@@ -1,0 +1,21 @@
+{
+  "name": "cjvibe",
+  "version": "0.1.0",
+  "description": "CLI tool for syncing with self-hosted Confluence and Jira",
+  "bin": {
+    "cjvibe": "./bin/cjvibe.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/cli/index.ts",
+    "build": "bun build src/cli/index.ts --compile --outfile dist/cjvibe",
+    "link": "bun link",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "bun-types": "latest",
+    "typescript": "^5.9.3"
+  },
+  "trustedDependencies": [],
+  "private": true
+}
