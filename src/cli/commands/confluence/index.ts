@@ -7,17 +7,74 @@ import type { PageTreeNode } from "@/confluence/types";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function printTree(nodes: PageTreeNode[], indent = 0): void {
-  const CYAN = "\x1b[36m";
-  const DIM = "\x1b[2m";
-  const RESET = "\x1b[0m";
-  const prefix = "  ".repeat(indent);
-  for (const node of nodes) {
-    const connector = indent === 0 ? "" : "└─ ";
-    log.plain(`${prefix}${connector}${CYAN}[${node.id}]${RESET} v${node.version} — ${node.title}`);
-    log.dim(`${prefix}  ${DIM}${node.webUrl}${RESET}`);
+/**
+ * Natural-sort comparator: "WP2" < "WP10", "WP1.1" < "WP1.2".
+ * Falls back to lexicographic for purely alphabetic strings.
+ */
+function naturalCompare(a: string, b: string): number {
+  const re = /(\d+)/g;
+  const aParts = a.split(re);
+  const bParts = b.split(re);
+  for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+    const ap = aParts[i] ?? "";
+    const bp = bParts[i] ?? "";
+    const an = Number(ap);
+    const bn = Number(bp);
+    if (!isNaN(an) && !isNaN(bn)) {
+      if (an !== bn) return an - bn;
+    } else {
+      const cmp = ap.localeCompare(bp);
+      if (cmp !== 0) return cmp;
+    }
+  }
+  return 0;
+}
+
+const BOLD  = "\x1b[1m";
+const DIM   = "\x1b[2m";
+const RESET = "\x1b[0m";
+
+// Colors cycled per depth level: cyan → green → yellow → magenta → blue → red …
+const DEPTH_COLORS = [
+  "\x1b[36m", // 0  cyan
+  "\x1b[32m", // 1  green
+  "\x1b[33m", // 2  yellow
+  "\x1b[35m", // 3  magenta
+  "\x1b[34m", // 4  blue
+  "\x1b[31m", // 5  red
+];
+
+function depthColor(depth: number): string {
+  return DEPTH_COLORS[depth % DEPTH_COLORS.length]!;
+}
+
+/**
+ * Recursively print children with proper ├─ / └─ / │ connectors.
+ * Each depth level gets its own colour applied to the connector + [ID].
+ */
+function printTree(
+  nodes: PageTreeNode[],
+  linePrefix = "",
+  showUrls = false,
+  depth = 1,
+): void {
+  const color  = depthColor(depth);
+  const sorted = [...nodes].sort((a, b) => naturalCompare(a.title, b.title));
+  for (let i = 0; i < sorted.length; i++) {
+    const node    = sorted[i]!;
+    const isLast  = i === sorted.length - 1;
+    const connector = isLast ? "└─ " : "├─ ";
+    const guide     = isLast ? "   " : "│  ";
+
+    process.stdout.write(
+      `${linePrefix}${color}${connector}${BOLD}[${node.id}]${RESET}` +
+      `${DIM} v${node.version}${RESET} — ${node.title}\n`,
+    );
+    if (showUrls) {
+      process.stdout.write(`${linePrefix}${guide}${DIM}${node.webUrl}${RESET}\n`);
+    }
     if (node.children.length > 0) {
-      printTree(node.children, indent + 1);
+      printTree(node.children, linePrefix + guide, showUrls, depth + 1);
     }
   }
 }
@@ -164,8 +221,10 @@ async function handleTree(args: ParsedArgs): Promise<void> {
   const { createConfluenceClient } = await import("@/confluence/client");
   const client = await createConfluenceClient();
 
-  const rootLabel = rootPageId ? `page ${rootPageId}` : `space root`;
+  const rootLabel = rootPageId ? `page ${rootPageId}` : "space root";
   log.plain(`Building page tree for "${spaceKey}" from ${rootLabel}...`);
+
+  const showUrls = Boolean(args.flags["urls"]);
 
   const tree = await client.getPageTree(spaceKey, rootPageId);
 
@@ -175,7 +234,19 @@ async function handleTree(args: ParsedArgs): Promise<void> {
   }
 
   log.section(`Page tree — ${spaceKey}${rootPageId ? ` (root: ${rootPageId})` : ""}`);
-  printTree(tree);
+  log.dim(`  Sorted alphabetically. Use --urls to show URLs. Copy a [ID] to use with --root or future pull commands.\n`);
+
+  for (const root of [...tree].sort((a, b) => naturalCompare(a.title, b.title))) {
+    // Root node: depth-0 colour, no connector
+    const c0 = depthColor(0);
+    process.stdout.write(
+      `${c0}${BOLD}[${root.id}]${RESET}${DIM} v${root.version}${RESET} — ${root.title}\n`,
+    );
+    if (showUrls) {
+      process.stdout.write(`${DIM}${root.webUrl}${RESET}\n`);
+    }
+    printTree(root.children, "", showUrls);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +295,7 @@ export const confluenceCommand: Command = {
     },
     {
       name: "tree",
-      description: "Page tree  [--space=KEY] [--root=PAGE_ID]",
+      description: "Page tree  [--space=KEY] [--root=PAGE_ID] [--urls]",
       handler: handleTree,
     },
   ],
