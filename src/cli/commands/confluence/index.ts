@@ -371,6 +371,7 @@ async function handlePull(args: ParsedArgs): Promise<void> {
   const spaceDir = join(pagesDir, spaceKey);
   const forceSelect = Boolean(args.flags["select"]);
   const forceAll = Boolean(args.flags["all"]);
+  const forcePull = Boolean(args.flags["force"]);
 
   const client = await createConfluenceClient();
 
@@ -459,7 +460,7 @@ async function handlePull(args: ParsedArgs): Promise<void> {
     // Skip if version hasn't changed AND local file still matches manifest hash
     // (a restore changes the file but keeps manifest version → hash mismatch
     // signals we should re-pull the current remote content)
-    if (existing && existing.version === pageMeta.version.number) {
+    if (!forcePull && existing && existing.version === pageMeta.version.number) {
       const filePath = join(spaceDir, existing.file);
       if (existsSync(filePath)) {
         const localContent = await readFile(filePath, "utf-8");
@@ -957,7 +958,7 @@ export const confluenceCommand: Command = {
     },
     {
       name: "pull",
-      description: "Pull pages as .gcm files  [--space=KEY] [--select] [--all] [--dir=PATH]",
+      description: "Pull pages as .gcm files  [--space=KEY] [--select] [--all] [--force] [--dir=PATH]",
       handler: handlePull,
     },
     {

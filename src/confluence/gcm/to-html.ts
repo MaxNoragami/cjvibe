@@ -14,13 +14,16 @@ import { parseFrontmatter, parseTagAttrs, escapeXhtml, type GcmMetadata } from "
 // Jira macro generation
 // ---------------------------------------------------------------------------
 
-function jiraMacro(key: string, server = "", serverId = ""): string {
+function jiraMacro(key: string, server = "", serverId = "", showSummary = true): string {
   const parts: string[] = [];
   if (server) {
     parts.push(`<ac:parameter ac:name="server">${escapeXhtml(server)}</ac:parameter>`);
   }
   if (serverId) {
     parts.push(`<ac:parameter ac:name="serverId">${serverId}</ac:parameter>`);
+  }
+  if (!showSummary) {
+    parts.push(`<ac:parameter ac:name="showSummary">false</ac:parameter>`);
   }
   parts.push(`<ac:parameter ac:name="key">${escapeXhtml(key)}</ac:parameter>`);
   return `<ac:structured-macro ac:name="jira" ac:schema-version="1">${parts.join("")}</ac:structured-macro>`;
@@ -39,10 +42,13 @@ function convertInline(text: string, server = "", serverId = ""): string {
     return `\x00PH${idx}\x00`;
   }
 
-  // {jira:KEY}
+  // {jira:KEY} or {jira:KEY|nosummary}
   text = text.replace(
-    /\{jira:([A-Z][A-Z0-9]*-\d+)\}/g,
-    (_m, key: string) => ph(jiraMacro(key, server, serverId)),
+    /\{jira:([A-Z][A-Z0-9]*-\d+)(?:\|nosummary)?\}/g,
+    (_m, key: string) => {
+      const hideSummary = _m.includes("|nosummary");
+      return ph(jiraMacro(key, server, serverId, !hideSummary));
+    },
   );
 
   // {br} → <br/>

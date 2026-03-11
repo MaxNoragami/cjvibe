@@ -221,7 +221,9 @@ class GCMBuilder {
 
     if (name === "jira") {
       const key = params["key"] ?? "UNKNOWN-0";
-      this._emit(`{jira:${key}}`);
+      const showSummary = params["showSummary"];
+      const suffix = showSummary?.toLowerCase() === "false" ? "|nosummary" : "";
+      this._emit(`{jira:${key}${suffix}}`);
     } else if (name === "anchor") {
       let aname = params[""] ?? params["name"] ?? "";
       if (!aname) {

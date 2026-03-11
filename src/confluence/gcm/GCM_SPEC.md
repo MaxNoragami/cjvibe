@@ -130,6 +130,10 @@ def hello():
 ```
 {jira:GMS-10}
 ```
+With summary hidden (key-only display):
+```
+{jira:GMS-10|nosummary}
+```
 Renders locally with the issue key. On push, reconstructed with server/serverId
 from config.
 
@@ -217,9 +221,10 @@ External image (ri:url):
 
 ```
 {jira:GMS-10}
+{jira:GMS-10|nosummary}
 ```
 
-Same syntax as block — context determines placement.
+Append `|nosummary` to hide the issue summary. Same syntax as block — context determines placement.
 
 ### Status badge (inline)
 
