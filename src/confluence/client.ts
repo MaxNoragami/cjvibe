@@ -5,6 +5,7 @@ import type {
   ConfluencePageSummary,
   ConfluenceSpace,
   PageTreeNode,
+  PageVersion,
   PaginatedResult,
 } from "./types";
 
@@ -225,17 +226,70 @@ export class ConfluenceClient {
     body: string;
     currentVersion: number;
   }): Promise<ConfluencePage> {
-    return this.put<ConfluencePage>(`/content/${params.pageId}`, {
-      type: "page",
-      title: params.title,
-      version: { number: params.currentVersion + 1 },
-      body: { storage: { value: params.body, representation: "storage" } },
-    });
+    // notifyWatchers=false — never spam page watchers with programmatic pushes
+    return this.put<ConfluencePage>(
+      `/content/${params.pageId}?notifyWatchers=false`,
+      {
+        type: "page",
+        title: params.title,
+        version: { number: params.currentVersion + 1 },
+        body: { storage: { value: params.body, representation: "storage" } },
+      },
+    );
   }
 
   /** Delete a page (moves to trash). */
   async deletePage(pageId: string): Promise<void> {
     await this.delete(`/content/${pageId}`);
+  }
+
+  /**
+   * Fetch the version history for a page by individually requesting each
+   * historical version's metadata (lightweight, no body). Works on all
+   * Confluence Server versions that don't expose the /version sub-resource.
+   *
+   * @param pageId       - The page to inspect
+   * @param currentVersion - Current version number (pass the value you already
+   *                         fetched from getPage to avoid a second round-trip)
+   */
+  async getVersionHistory(pageId: string, currentVersion: number): Promise<PageVersion[]> {
+    if (currentVersion <= 1) return [];
+
+    const CONCURRENCY = 10;
+    const all: PageVersion[] = [];
+
+    // Fetch version metadata in parallel batches (oldest first, then reverse)
+    for (let start = 1; start < currentVersion; start += CONCURRENCY) {
+      const nums: number[] = [];
+      for (let n = start; n < Math.min(start + CONCURRENCY, currentVersion); n++) {
+        nums.push(n);
+      }
+      const batch = await Promise.all(
+        nums.map((n) =>
+          this.get<ConfluencePageSummary>(
+            `/content/${pageId}?version=${n}&expand=version`,
+          ).then((p): PageVersion => ({
+            number:    p.version.number,
+            when:      p.version.when,
+            ...(p.version.by !== undefined ? { by: p.version.by } : {}),
+            minorEdit: false,
+          })),
+        ),
+      );
+      all.push(...batch);
+    }
+
+    // Return newest first
+    return all.sort((a, b) => b.number - a.number);
+  }
+
+  /**
+   * Fetch the storage-format body of a page at a specific historical version.
+   */
+  async getPageAtVersion(pageId: string, versionNumber: number): Promise<ConfluencePage> {
+    return this.get<ConfluencePage>(
+      `/content/${pageId}?version=${versionNumber}&expand=body.storage,version,ancestors,_links,space`,
+    );
   }
 
   // ---------------------------------------------------------------------------

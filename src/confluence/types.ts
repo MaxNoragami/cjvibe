@@ -60,6 +60,26 @@ export interface PaginatedResult<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Version history
+// ---------------------------------------------------------------------------
+
+/** A single entry from GET /rest/api/content/{id}/version */
+export interface PageVersion {
+  number: number;
+  when: string;
+  message?: string;
+  minorEdit: boolean;
+  by?: { displayName: string; username: string };
+}
+
+export interface PageVersionResult {
+  results: PageVersion[];
+  start: number;
+  limit: number;
+  size: number;
+}
+
+// ---------------------------------------------------------------------------
 // Derived / local types
 // ---------------------------------------------------------------------------
 

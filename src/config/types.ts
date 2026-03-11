@@ -24,6 +24,39 @@ export interface ConfluenceConfig {
    * pull/push operations. Find it in the URL: ?pageId=XXXXXXX
    */
   rootPageId?: string;
+  /**
+   * Jira server name used when reconstructing {jira:KEY} macros on push.
+   * Found inside Confluence's Jira macro XML: <ac:parameter ac:name="server">
+   */
+  jiraServer?: string;
+  /**
+   * Jira serverId used when reconstructing {jira:KEY} macros on push.
+   * Found inside Confluence's Jira macro XML: <ac:parameter ac:name="serverId">
+   */
+  jiraServerId?: string;
+}
+
+/** Tracks which pages are synced and their last-known state. */
+export interface SyncManifestEntry {
+  /** Confluence page ID */
+  pageId: string;
+  /** Page title at time of last sync */
+  title: string;
+  /** Version number at time of last sync */
+  version: number;
+  /** SHA-256 hash of the local .gcm file content at last sync */
+  hash: string;
+  /** Relative path to the .gcm file from pagesDir */
+  file: string;
+}
+
+export interface SyncManifest {
+  /** Space key this manifest belongs to */
+  spaceKey: string;
+  /** Epoch ms of last sync */
+  lastSync: number;
+  /** Page entries */
+  pages: SyncManifestEntry[];
 }
 
 export interface Config {

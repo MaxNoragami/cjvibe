@@ -17,5 +17,8 @@
     "typescript": "^5.9.3"
   },
   "trustedDependencies": [],
-  "private": true
+  "private": true,
+  "dependencies": {
+    "htmlparser2": "^10.1.0"
+  }
 }
