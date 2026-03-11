@@ -85,43 +85,114 @@ function printTree(
 
 /** `cjvibe confluence init` — interactively configure Confluence credentials */
 async function handleInit(_args: ParsedArgs): Promise<void> {
+  const { select } = await import("@/utils/select");
+  const { ConfluenceClient } = await import("@/confluence/client");
+
   log.section("Confluence Setup");
-  log.info("This wizard will save your Confluence credentials to:");
+  log.info("Credentials will be saved to:");
   log.dim(configFilePath());
   log.plain("");
 
-  const baseUrl = prompt("Confluence base URL (e.g. https://wiki.example.com):")?.trim();
+  // ── Step 1: credentials (plain text prompts) ─────────────────────────────
+  const baseUrl = prompt("Confluence base URL (e.g. http://wiki.example.com):")?.trim();
   const username = prompt("Username / email:")?.trim();
-  const token = prompt("Personal access token (PAT):")?.trim();
-  const authMethodRaw = prompt(
-    "Auth method — (1) bearer [default, self-hosted PAT]  (2) basic [Cloud API token]:",
-  )?.trim();
-  const defaultSpace = prompt("Default space key (optional, press Enter to skip):")?.trim();
-  const rootPageId = prompt(
-    "Root page ID for tree/sync (optional — find it in the page URL as ?pageId=XXXXX):",
-  )?.trim();
+  const token    = prompt("Personal access token (PAT):")?.trim();
 
   if (!baseUrl || !username || !token) {
     log.error("Base URL, username, and token are all required.");
     process.exit(1);
   }
 
-  const authMethod =
-    authMethodRaw === "2" || authMethodRaw === "basic" ? "basic" : "bearer";
+  // Bearer is always correct for self-hosted PATs
+  const client = new ConfluenceClient({ baseUrl, username, token, authMethod: "bearer" });
 
+  // ── Step 2: verify connectivity ──────────────────────────────────────────
+  log.plain("\nVerifying connection...");
+  let spacesResult: Awaited<ReturnType<typeof client.listSpaces>>;
+  try {
+    spacesResult = await client.listSpaces(100);
+    log.success(`Connected — ${spacesResult.results.length} space(s) found.\n`);
+  } catch (err) {
+    const { toMessage } = await import("@/utils/errors");
+    log.error(`Connection failed: ${toMessage(err)}`);
+    log.dim("Check your base URL, username, and PAT.");
+    process.exit(1);
+  }
+
+  // ── Step 3: pick default space ───────────────────────────────────────────
+  const spaceItems = spacesResult.results.map((s) => ({
+    label: `${s.key.padEnd(14)} ${s.name}  [${s.type}]`,
+    value: s.key,
+  }));
+
+  const defaultSpace = await select(spaceItems, {
+    title: "Default space (used when --space is omitted):",
+    pageSize: 14,
+  });
+
+  if (!defaultSpace) {
+    log.warn("No space selected — skipping default space.");
+  } else {
+    log.success(`Default space: ${defaultSpace}\n`);
+  }
+
+  // ── Step 4: pick root page ───────────────────────────────────────────────
+  let rootPageId: string | undefined;
+
+  if (defaultSpace) {
+    log.plain("Fetching top-level pages for root page selection...");
+
+    try {
+      // Get the space homepage, then its direct children
+      const homepageId = await client.getSpaceHomepageId(defaultSpace);
+      const topPages   = homepageId
+        ? await client.getChildren(homepageId)
+        : (await client.listPages(defaultSpace, 100)).results;
+
+      if (topPages.length === 0) {
+        log.warn("No top-level pages found — skipping root page selection.");
+      } else {
+        const pageItems = [
+          { label: "(none — skip)", value: "" as string },
+          ...topPages.map((p) => ({
+            label: `[${p.id}]  ${p.title}`,
+            value: p.id,
+          })),
+        ];
+
+        const selected = await select(pageItems, {
+          title: "Root page for tree/sync (depth-1 pages):",
+          pageSize: 14,
+        });
+
+        rootPageId = selected || undefined;
+        if (rootPageId) {
+          log.success(`Root page ID: ${rootPageId}\n`);
+        } else {
+          log.dim("No root page set.\n");
+        }
+      }
+    } catch (err) {
+      const { toMessage } = await import("@/utils/errors");
+      log.warn(`Could not fetch pages: ${toMessage(err)} — skipping root page selection.`);
+    }
+  }
+
+  // ── Step 5: save ─────────────────────────────────────────────────────────
   await patchConfig({
     confluence: {
       baseUrl,
       username,
       token,
-      authMethod,
+      authMethod: "bearer",
       ...(defaultSpace ? { defaultSpace } : {}),
-      ...(rootPageId ? { rootPageId } : {}),
+      ...(rootPageId   ? { rootPageId }   : {}),
     },
   });
 
   log.success("Confluence config saved.");
 }
+
 
 /** `cjvibe confluence status` — verify config & connectivity */
 async function handleStatus(_args: ParsedArgs): Promise<void> {

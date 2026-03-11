@@ -105,6 +105,22 @@ export class ConfluenceClient {
     );
   }
 
+  /** Fetch direct children (one level deep) of a page by ID. */
+  async getChildren(pageId: string): Promise<ConfluencePageSummary[]> {
+    const result = await this.get<PaginatedResult<ConfluencePageSummary>>(
+      `/content/${pageId}/child/page?limit=100&expand=${ConfluenceClient.PAGE_EXPAND}`,
+    );
+    return result.results;
+  }
+
+  /** Fetch the space homepage page ID. */
+  async getSpaceHomepageId(spaceKey: string): Promise<string | undefined> {
+    const raw = await this.get<{ homepage?: { id: string } }>(
+      `/space/${encodeURIComponent(spaceKey)}?expand=homepage`,
+    );
+    return raw.homepage?.id;
+  }
+
   /** Fetch every page in a space, following pagination automatically. */
   async getAllPages(spaceKey: string): Promise<ConfluencePageSummary[]> {
     const all: ConfluencePageSummary[] = [];
