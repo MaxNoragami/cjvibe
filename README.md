@@ -467,6 +467,7 @@ priority: Highest
 assignee: John Doe
 reporter: Jane Smith
 project: GMS
+epic: GMS-1
 created: 2026-03-05T12:33:52.000+0100
 updated: 2026-03-12T00:47:25.000+0100
 url: http://jira.example.com/browse/GMS-20
@@ -500,9 +501,12 @@ cjvibe jira push --dry-run
 | `summary` | Updated directly |
 | `priority` | Matched by name (`Highest`, `High`, `Medium`, `Low`, `Lowest`) |
 | `assignee` | Resolved from display name via user search; set to `Unassigned` to clear |
+| `epic` | Assign by Epic key (`PROJ-123`) or by exact epic name/summary on the board; set to `None` to clear |
 | `labels` | Comma-separated list, replaces all existing labels |
 | `description` | Body text under the `## Description` section |
 | `status` | Applied via Jira workflow transition by target status name. Works only if that status is directly reachable from the current state |
+
+Epic comparisons are key-based (`GMS-123`) after resolution, so unchanged epics are not re-pushed on subsequent `jira push` runs.
 
 **Read-only fields** (changes are ignored): `key`, `id`, `type`, `reporter`, `project`, `created`, `updated`, `url`, `parent`, subtasks.
 
@@ -513,6 +517,7 @@ Example — change summary and reassign:
 key: GMS-20
 summary: Dashboard auto-refresh with staleness warning   # edited
 assignee: Jane Smith                                      # edited
+epic: GMS-1                                               # edited (or None)
 status: In Progress                                       # triggers transition
 ...
 ---

@@ -5,6 +5,7 @@ import type {
   JiraBoardConfig,
   JiraComment,
   JiraCommentResult,
+  JiraEpic,
   JiraIssue,
   JiraPaginatedResult,
   JiraSearchResult,
@@ -126,6 +127,23 @@ export class JiraClient {
     return this.get<JiraBoardConfig>(`/board/${boardId}/configuration`, "agile");
   }
 
+  /** List epics available on a board (auto-paginates). */
+  async listBoardEpics(boardId: number): Promise<JiraEpic[]> {
+    const all: JiraEpic[] = [];
+    let startAt = 0;
+    const max = 50;
+    while (true) {
+      const page = await this.get<JiraPaginatedResult<JiraEpic>>(
+        `/board/${boardId}/epic?startAt=${startAt}&maxResults=${max}`,
+        "agile",
+      );
+      all.push(...page.values);
+      if (page.isLast || page.values.length < max) break;
+      startAt += max;
+    }
+    return all;
+  }
+
   // ---------------------------------------------------------------------------
   // Issues
   // ---------------------------------------------------------------------------
@@ -144,7 +162,7 @@ export class JiraClient {
     const jql = opts.assignee ? `assignee=${opts.assignee}` : "";
 
     while (true) {
-      const fields = "summary,status,assignee,reporter,issuetype,priority,project,created,updated,description,labels,components,fixVersions,parent,subtasks";
+      const fields = "summary,status,assignee,reporter,issuetype,priority,project,created,updated,description,epic,labels,components,fixVersions,parent,subtasks";
       let path = `/board/${boardId}/issue?startAt=${startAt}&maxResults=${max}&fields=${fields}`;
       if (jql) path += `&jql=${encodeURIComponent(jql)}`;
       const page = await this.get<JiraSearchResult>(path, "agile");
@@ -157,7 +175,31 @@ export class JiraClient {
 
   /** Get a single issue by key. */
   async getIssue(key: string): Promise<JiraIssue> {
-    return this.get<JiraIssue>(`/issue/${key}`);
+    const fields = "summary,status,assignee,reporter,issuetype,priority,project,created,updated,description,epic,labels,components,fixVersions,parent,subtasks";
+    return this.get<JiraIssue>(`/issue/${key}?fields=${fields}`);
+  }
+
+  /** Resolve the Jira field id for Epic Link (e.g. customfield_10008). */
+  async getEpicLinkFieldId(issueKey: string): Promise<string | null> {
+    const meta = await this.get<{
+      fields: Record<string, { name?: string; schema?: { custom?: string } }>;
+    }>(`/issue/${issueKey}/editmeta`);
+
+    for (const [fieldId, field] of Object.entries(meta.fields)) {
+      const isByName = (field.name ?? "").toLowerCase() === "epic link";
+      const custom = field.schema?.custom ?? "";
+      const isEpicLink = custom.includes("gh-epic-link");
+      if (isByName || isEpicLink) return fieldId;
+    }
+    return null;
+  }
+
+  /** Fetch a single raw field value from an issue (supports customfield_* ids). */
+  async getIssueFieldValue(issueKey: string, fieldId: string): Promise<unknown> {
+    const data = await this.get<{ fields: Record<string, unknown> }>(
+      `/issue/${issueKey}?fields=${encodeURIComponent(fieldId)}`,
+    );
+    return data.fields[fieldId];
   }
 
   /**
