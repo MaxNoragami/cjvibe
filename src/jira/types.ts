@@ -116,3 +116,24 @@ export interface JiraSearchResult {
   total: number;
   issues: JiraIssue[];
 }
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+export interface JiraComment {
+  id: string;
+  self: string;
+  body: string;
+  author: JiraUser;
+  updateAuthor: JiraUser;
+  created: string;
+  updated: string;
+}
+
+export interface JiraCommentResult {
+  startAt: number;
+  maxResults: number;
+  total: number;
+  comments: JiraComment[];
+}

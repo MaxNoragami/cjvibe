@@ -3,6 +3,8 @@ import { CjvibeError } from "@/utils/errors";
 import type {
   JiraBoard,
   JiraBoardConfig,
+  JiraComment,
+  JiraCommentResult,
   JiraIssue,
   JiraPaginatedResult,
   JiraSearchResult,
@@ -69,6 +71,22 @@ export class JiraClient {
   private get<T>(path: string, api: "agile" | "api2" = "api2"): Promise<T> {
     const prefix = api === "agile" ? "/rest/agile/1.0" : "/rest/api/2";
     return this.request<T>(`${this.baseUrl}${prefix}${path}`);
+  }
+
+  private post<T>(path: string, body: unknown, api: "agile" | "api2" = "api2"): Promise<T> {
+    const prefix = api === "agile" ? "/rest/agile/1.0" : "/rest/api/2";
+    return this.request<T>(`${this.baseUrl}${prefix}${path}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  private put<T>(path: string, body: unknown, api: "agile" | "api2" = "api2"): Promise<T> {
+    const prefix = api === "agile" ? "/rest/agile/1.0" : "/rest/api/2";
+    return this.request<T>(`${this.baseUrl}${prefix}${path}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -138,6 +156,48 @@ export class JiraClient {
   /** Get a single issue by key. */
   async getIssue(key: string): Promise<JiraIssue> {
     return this.get<JiraIssue>(`/issue/${key}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Comments
+  // ---------------------------------------------------------------------------
+
+  /** Fetch all comments for an issue (auto-paginates). */
+  async getComments(issueKey: string): Promise<JiraComment[]> {
+    const all: JiraComment[] = [];
+    let startAt = 0;
+    const max = 100;
+    while (true) {
+      const page = await this.get<JiraCommentResult>(
+        `/issue/${issueKey}/comment?startAt=${startAt}&maxResults=${max}&orderBy=created`,
+      );
+      all.push(...page.comments);
+      if (startAt + page.maxResults >= page.total) break;
+      startAt += max;
+    }
+    return all;
+  }
+
+  /** Create a new comment on an issue. Returns the created comment. */
+  async createComment(issueKey: string, body: string): Promise<JiraComment> {
+    return this.post<JiraComment>(`/issue/${issueKey}/comment`, { body });
+  }
+
+  /** Update an existing comment. Returns the updated comment. */
+  async updateComment(issueKey: string, commentId: string, body: string): Promise<JiraComment> {
+    return this.put<JiraComment>(`/issue/${issueKey}/comment/${commentId}`, { body });
+  }
+
+  /** Delete a comment on an issue. */
+  async deleteComment(issueKey: string, commentId: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/rest/api/2/issue/${issueKey}/comment/${commentId}`, {
+      method: "DELETE",
+      headers: { Authorization: this.authHeader, Accept: "application/json" },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new JiraError(`Jira API error ${res.status} ${res.statusText}: ${body}`, res.status);
+    }
   }
 }
 
