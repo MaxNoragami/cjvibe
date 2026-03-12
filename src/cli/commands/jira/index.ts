@@ -526,9 +526,12 @@ async function handlePushIssues(args: ParsedArgs): Promise<void> {
     // Push status transition
     if (statusChange) {
       try {
-        const ok = await client.transitionIssue(local.key, statusChange);
-        if (!ok) {
-          log.warn(`  ⚠ transition to "${statusChange}" not available (check workflow)`);
+        const result = await client.transitionIssue(local.key, statusChange);
+        if (!result.ok) {
+          const options = result.availableStatuses.length > 0
+            ? ` Available now: ${result.availableStatuses.join(", ")}`
+            : "";
+          log.warn(`  ⚠ transition to "${statusChange}" not available.${options}`);
         }
       } catch (err) {
         const { toMessage } = await import("@/utils/errors");
