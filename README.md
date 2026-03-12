@@ -502,7 +502,7 @@ cjvibe jira push --dry-run
 | `assignee` | Resolved from display name via user search; set to `Unassigned` to clear |
 | `labels` | Comma-separated list, replaces all existing labels |
 | `description` | Body text under the `## Description` section |
-| `status` | Applied via Jira workflow transition — only works if the target status is reachable from the current one |
+| `status` | Applied via Jira workflow transition by target status name. Works only if that status is directly reachable from the current state |
 
 **Read-only fields** (changes are ignored): `key`, `id`, `type`, `reporter`, `project`, `created`, `updated`, `url`, `parent`, subtasks.
 

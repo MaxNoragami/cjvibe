@@ -182,18 +182,29 @@ export class JiraClient {
   }
 
   /**
-   * Transition an issue to a new status by name.
-   * Fetches available transitions, matches by name, and executes.
-   * Returns true if transition was performed, false if status name not found.
+   * Transition an issue to a new status by destination status name.
+   * Matches against transition `to.name` first (actual target status), then
+   * falls back to transition label (`name`) for compatibility.
    */
-  async transitionIssue(key: string, statusName: string): Promise<boolean> {
-    const data = await this.get<{ transitions: { id: string; name: string }[] }>(
-      `/issue/${key}/transitions`,
-    );
-    const target = data.transitions.find(
-      (t) => t.name.toLowerCase() === statusName.toLowerCase(),
-    );
-    if (!target) return false;
+  async transitionIssue(
+    key: string,
+    statusName: string,
+  ): Promise<{ ok: true } | { ok: false; availableStatuses: string[] }> {
+    const data = await this.get<{
+      transitions: { id: string; name: string; to?: { name?: string } }[];
+    }>(`/issue/${key}/transitions`);
+
+    const wanted = statusName.toLowerCase();
+    const target = data.transitions.find((t) => {
+      const toName = t.to?.name?.toLowerCase();
+      return toName === wanted || t.name.toLowerCase() === wanted;
+    });
+    if (!target) {
+      const availableStatuses = data.transitions
+        .map((t) => t.to?.name ?? t.name)
+        .filter((v): v is string => Boolean(v));
+      return { ok: false, availableStatuses };
+    }
 
     const res = await fetch(`${this.baseUrl}/rest/api/2/issue/${key}/transitions`, {
       method: "POST",
@@ -208,7 +219,7 @@ export class JiraClient {
       const body = await res.text().catch(() => "");
       throw new JiraError(`Transition failed ${res.status}: ${body}`, res.status);
     }
-    return true;
+    return { ok: true };
   }
 
   /**
