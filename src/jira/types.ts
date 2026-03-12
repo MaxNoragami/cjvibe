@@ -137,3 +137,27 @@ export interface JiraCommentResult {
   total: number;
   comments: JiraComment[];
 }
+
+// ---------------------------------------------------------------------------
+// Worklogs
+// ---------------------------------------------------------------------------
+
+export interface JiraWorklog {
+  id: string;
+  self: string;
+  comment: string;
+  author: JiraUser;
+  updateAuthor: JiraUser;
+  created: string;
+  updated: string;
+  started: string;        // ISO date — when the work was performed
+  timeSpent: string;      // human "3h 20m"
+  timeSpentSeconds: number;
+}
+
+export interface JiraWorklogResult {
+  startAt: number;
+  maxResults: number;
+  total: number;
+  worklogs: JiraWorklog[];
+}

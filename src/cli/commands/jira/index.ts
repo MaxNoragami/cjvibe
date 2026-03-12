@@ -1,7 +1,7 @@
 import type { Command, ParsedArgs } from "@/cli/router";
 import { log } from "@/utils/logger";
 import { configFilePath, patchConfig, requireSection } from "@/config";
-import type { JiraIssue, JiraComment } from "@/jira/types";
+import type { JiraIssue, JiraComment, JiraWorklog } from "@/jira/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -964,6 +964,523 @@ async function handleDeleteComment(args: ParsedArgs): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Worklog sync helpers
+// ---------------------------------------------------------------------------
+
+interface WorklogManifestEntry {
+  worklogId: string;
+  author: string;
+  authorDisplay: string;
+  started: string;
+  timeSpent: string;
+  timeSpentSeconds: number;
+  updated: string;
+  hash: string;
+  file: string;
+}
+
+interface WorklogManifest {
+  issueKey: string;
+  lastSync: number;
+  worklogs: WorklogManifestEntry[];
+}
+
+async function loadWorklogManifest(dir: string): Promise<WorklogManifest | null> {
+  const { join } = await import("node:path");
+  const { existsSync } = await import("node:fs");
+  const { readFile } = await import("node:fs/promises");
+  const p = join(dir, ".cjvibe-worklogs.json");
+  if (!existsSync(p)) return null;
+  try {
+    return JSON.parse(await readFile(p, "utf-8")) as WorklogManifest;
+  } catch {
+    return null;
+  }
+}
+
+async function saveWorklogManifest(dir: string, manifest: WorklogManifest): Promise<void> {
+  const { join } = await import("node:path");
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(join(dir, ".cjvibe-worklogs.json"), JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+}
+
+function worklogToMarkdown(wl: JiraWorklog, issueKey: string): string {
+  const lines: string[] = [];
+  lines.push("---");
+  lines.push(`worklog_id: ${wl.id}`);
+  lines.push(`issue: ${issueKey}`);
+  lines.push(`author: ${wl.author.displayName}`);
+  lines.push(`author_key: ${wl.author.name}`);
+  lines.push(`started: ${wl.started}`);
+  lines.push(`time_spent: ${wl.timeSpent}`);
+  lines.push(`time_spent_seconds: ${wl.timeSpentSeconds}`);
+  lines.push(`created: ${wl.created}`);
+  lines.push(`updated: ${wl.updated}`);
+  lines.push("---");
+  lines.push("");
+  if (wl.comment) lines.push(wl.comment);
+  lines.push("");
+  return lines.join("\n");
+}
+
+function parseWorklogFile(content: string): {
+  meta: Record<string, string>;
+  body: string;
+} {
+  const meta: Record<string, string> = {};
+  let body = content;
+
+  if (content.startsWith("---\n") || content.startsWith("---\r\n")) {
+    const endIdx = content.indexOf("\n---\n", 4);
+    const endIdxR = content.indexOf("\r\n---\r\n", 4);
+    const end = endIdx !== -1 ? endIdx : endIdxR;
+    if (end !== -1) {
+      const sep = endIdx !== -1 ? "\n" : "\r\n";
+      const fmBlock = content.slice(4, end);
+      for (const line of fmBlock.split(sep)) {
+        const colonIdx = line.indexOf(":");
+        if (colonIdx !== -1) {
+          const key = line.slice(0, colonIdx).trim();
+          const val = line.slice(colonIdx + 1).trim();
+          meta[key] = val;
+        }
+      }
+      body = content.slice(end + (sep === "\n" ? 5 : 7)).replace(/^\n+/, "");
+    }
+  }
+
+  return { meta, body };
+}
+
+function worklogFilename(worklogId: string, authorKey: string, seq: number): string {
+  const safe = authorKey.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `${String(seq).padStart(3, "0")}_${safe}_${worklogId}.md`;
+}
+
+function formatTimeSpent(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  if (m > 0) return `${m}m`;
+  return "0m";
+}
+
+// ---------------------------------------------------------------------------
+// Worklog command handlers
+// ---------------------------------------------------------------------------
+
+/** `cjvibe jira pull-logs --issue=KEY` */
+async function handlePullLogs(args: ParsedArgs): Promise<void> {
+  const { join } = await import("node:path");
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { existsSync } = await import("node:fs");
+  const { createJiraClient } = await import("@/jira/client");
+
+  const config = await requireSection("jira");
+
+  const issueKey = args.flags["issue"] ? String(args.flags["issue"]) : undefined;
+  if (!issueKey) {
+    log.error("Specify an issue with --issue=KEY (e.g. --issue=GMS-10).");
+    process.exit(1);
+  }
+
+  const boardId = args.flags["board"]
+    ? Number(args.flags["board"])
+    : config.defaultBoardId;
+
+  if (!boardId) {
+    log.error("No board specified. Use --board=ID or set a default.");
+    process.exit(1);
+  }
+
+  const client = await createJiraClient();
+  const issuesDir = resolveIssuesDir(args);
+  const logsDir = join(issuesDir, String(boardId), "worklogs", issueKey);
+
+  log.info(`Fetching worklogs for ${BOLD}${issueKey}${RESET}...`);
+  const worklogs = await client.getWorklogs(issueKey);
+
+  if (worklogs.length === 0) {
+    log.success("No worklogs found.");
+    return;
+  }
+
+  if (!existsSync(logsDir)) {
+    await mkdir(logsDir, { recursive: true });
+  }
+
+  let manifest = await loadWorklogManifest(logsDir);
+  if (!manifest) {
+    manifest = { issueKey, lastSync: 0, worklogs: [] };
+  }
+
+  let pulled = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (let i = 0; i < worklogs.length; i++) {
+    const wl = worklogs[i]!;
+    const existing = manifest.worklogs.find((e) => e.worklogId === wl.id);
+    const filename = existing?.file ?? worklogFilename(wl.id, wl.author.name, i + 1);
+
+    const content = worklogToMarkdown(wl, issueKey);
+    const hash = await hashContent(content);
+
+    if (existing) {
+      if (existing.updated === wl.updated) {
+        skipped++;
+        continue;
+      }
+      await writeFile(join(logsDir, filename), content, "utf-8");
+      existing.updated = wl.updated;
+      existing.started = wl.started;
+      existing.timeSpent = wl.timeSpent;
+      existing.timeSpentSeconds = wl.timeSpentSeconds;
+      existing.hash = hash;
+      updated++;
+      log.dim(`  ↻ ${filename} (updated)`);
+    } else {
+      await writeFile(join(logsDir, filename), content, "utf-8");
+      manifest.worklogs.push({
+        worklogId: wl.id,
+        author: wl.author.name,
+        authorDisplay: wl.author.displayName,
+        started: wl.started,
+        timeSpent: wl.timeSpent,
+        timeSpentSeconds: wl.timeSpentSeconds,
+        updated: wl.updated,
+        hash,
+        file: filename,
+      });
+      pulled++;
+      log.dim(`  ✓ ${filename}`);
+    }
+  }
+
+  manifest.lastSync = Date.now();
+  await saveWorklogManifest(logsDir, manifest);
+
+  log.plain("");
+  log.success(`Pull complete: ${pulled} new, ${updated} updated, ${skipped} unchanged.`);
+  log.dim(`Files at: ${logsDir}`);
+}
+
+/** `cjvibe jira push-logs --issue=KEY` */
+async function handlePushLogs(args: ParsedArgs): Promise<void> {
+  const { join } = await import("node:path");
+  const { readdir, readFile, writeFile, unlink } = await import("node:fs/promises");
+  const { existsSync } = await import("node:fs");
+  const { createJiraClient } = await import("@/jira/client");
+
+  const config = await requireSection("jira");
+
+  const issueKey = args.flags["issue"] ? String(args.flags["issue"]) : undefined;
+  if (!issueKey) {
+    log.error("Specify an issue with --issue=KEY (e.g. --issue=GMS-10).");
+    process.exit(1);
+  }
+
+  const boardId = args.flags["board"]
+    ? Number(args.flags["board"])
+    : config.defaultBoardId;
+
+  if (!boardId) {
+    log.error("No board specified. Use --board=ID or set a default.");
+    process.exit(1);
+  }
+
+  const dryRun = Boolean(args.flags["dry-run"]);
+  const client = await createJiraClient();
+  const issuesDir = resolveIssuesDir(args);
+  const logsDir = join(issuesDir, String(boardId), "worklogs", issueKey);
+
+  if (!existsSync(logsDir)) {
+    log.error(`No worklogs directory found at: ${logsDir}`);
+    log.dim("Run `cjvibe jira pull-logs --issue=KEY` first, or create .md files manually.");
+    process.exit(1);
+  }
+
+  let manifest = await loadWorklogManifest(logsDir);
+  if (!manifest) {
+    manifest = { issueKey, lastSync: 0, worklogs: [] };
+  }
+
+  let myUsername: string;
+  try {
+    const user = await client.myself();
+    myUsername = user.name;
+  } catch {
+    log.error("Could not identify current user.");
+    process.exit(1);
+  }
+
+  const files = (await readdir(logsDir)).filter((f) => f.endsWith(".md")).sort();
+
+  let created = 0;
+  let edited = 0;
+  let skippedCount = 0;
+  let errors = 0;
+
+  for (const file of files) {
+    const filePath = join(logsDir, file);
+    const content = await readFile(filePath, "utf-8");
+    const { meta, body } = parseWorklogFile(content);
+    const worklogId = meta["worklog_id"];
+    const timeSpent = meta["time_spent"];
+    const started = meta["started"];
+    const comment = body.trim();
+
+    if (worklogId) {
+      // Existing worklog — check if edited locally
+      const entry = manifest.worklogs.find((e) => e.worklogId === worklogId);
+      if (!entry) { skippedCount++; continue; }
+      if (entry.author !== myUsername) { skippedCount++; continue; }
+
+      const currentHash = await hashContent(content);
+      if (currentHash === entry.hash) { skippedCount++; continue; }
+
+      if (dryRun) {
+        log.dim(`  would update: ${file}`);
+        edited++;
+        continue;
+      }
+
+      try {
+        const updatedWl = await client.updateWorklog(
+          issueKey,
+          worklogId,
+          timeSpent || entry.timeSpent,
+          { ...(comment ? { comment } : {}), ...(started ? { started } : {}) },
+        );
+        entry.updated = updatedWl.updated;
+        entry.timeSpent = updatedWl.timeSpent;
+        entry.timeSpentSeconds = updatedWl.timeSpentSeconds;
+        entry.started = updatedWl.started;
+        entry.hash = await hashContent(content);
+        edited++;
+        log.dim(`  ↻ ${file} → updated`);
+      } catch (err) {
+        errors++;
+        const { toMessage } = await import("@/utils/errors");
+        log.error(`  ✗ ${file}: ${toMessage(err)}`);
+      }
+    } else {
+      // New worklog — no worklog_id in front-matter
+      if (!timeSpent) {
+        log.error(`  ✗ ${file}: missing time_spent in front-matter (e.g. "2h 30m")`);
+        errors++;
+        continue;
+      }
+
+      if (dryRun) {
+        log.dim(`  would create: ${file} (${timeSpent})`);
+        created++;
+        continue;
+      }
+
+      try {
+        const newWl = await client.createWorklog(issueKey, timeSpent, {
+          ...(comment ? { comment } : {}),
+          ...(started ? { started } : {}),
+        });
+
+        const newContent = worklogToMarkdown(newWl, issueKey);
+        const newFilename = worklogFilename(
+          newWl.id,
+          newWl.author.name,
+          manifest.worklogs.length + 1,
+        );
+        await unlink(filePath);
+        await writeFile(join(logsDir, newFilename), newContent, "utf-8");
+
+        manifest.worklogs.push({
+          worklogId: newWl.id,
+          author: newWl.author.name,
+          authorDisplay: newWl.author.displayName,
+          started: newWl.started,
+          timeSpent: newWl.timeSpent,
+          timeSpentSeconds: newWl.timeSpentSeconds,
+          updated: newWl.updated,
+          hash: await hashContent(newContent),
+          file: newFilename,
+        });
+        created++;
+        log.dim(`  ✓ ${file} → ${newFilename} (created)`);
+      } catch (err) {
+        errors++;
+        const { toMessage } = await import("@/utils/errors");
+        log.error(`  ✗ ${file}: ${toMessage(err)}`);
+      }
+    }
+  }
+
+  manifest.lastSync = Date.now();
+  await saveWorklogManifest(logsDir, manifest);
+
+  log.plain("");
+  if (dryRun) {
+    log.warn(`Dry run — would create ${created}, update ${edited}.`);
+  } else {
+    log.success(`Push complete: ${created} created, ${edited} updated, ${skippedCount} unchanged, ${errors} error(s).`);
+  }
+}
+
+/** `cjvibe jira delete-logs --issue=KEY` */
+async function handleDeleteLogs(args: ParsedArgs): Promise<void> {
+  const { join } = await import("node:path");
+  const { readFile, unlink } = await import("node:fs/promises");
+  const { existsSync } = await import("node:fs");
+  const { createJiraClient } = await import("@/jira/client");
+
+  const config = await requireSection("jira");
+
+  const issueKey = args.flags["issue"] ? String(args.flags["issue"]) : undefined;
+  if (!issueKey) {
+    log.error("Specify an issue with --issue=KEY (e.g. --issue=GMS-10).");
+    process.exit(1);
+  }
+
+  const boardId = args.flags["board"]
+    ? Number(args.flags["board"])
+    : config.defaultBoardId;
+
+  if (!boardId) {
+    log.error("No board specified. Use --board=ID or set a default.");
+    process.exit(1);
+  }
+
+  const client = await createJiraClient();
+  const issuesDir = resolveIssuesDir(args);
+  const logsDir = join(issuesDir, String(boardId), "worklogs", issueKey);
+
+  if (!existsSync(logsDir)) {
+    log.error(`No worklogs directory found at: ${logsDir}`);
+    log.dim(`Run \`cjvibe jira pull-logs --issue=${issueKey}\` first.`);
+    process.exit(1);
+  }
+
+  const manifest = await loadWorklogManifest(logsDir);
+  if (!manifest || manifest.worklogs.length === 0) {
+    log.warn("No worklogs in local manifest.");
+    return;
+  }
+
+  let myUsername: string;
+  try {
+    const user = await client.myself();
+    myUsername = user.name;
+  } catch {
+    log.error("Could not identify current user.");
+    process.exit(1);
+  }
+
+  const ownWorklogs = manifest.worklogs.filter((e) => e.author === myUsername);
+  if (ownWorklogs.length === 0) {
+    log.warn("No worklogs authored by you found locally.");
+    return;
+  }
+
+  const termCols = process.stdout.columns ?? 80;
+
+  const buildEntries = async () => {
+    return Promise.all(
+      ownWorklogs.map(async (entry) => {
+        let preview = "";
+        const fp = join(logsDir, entry.file);
+        if (existsSync(fp)) {
+          try {
+            const raw = await readFile(fp, "utf-8");
+            preview = parseWorklogFile(raw).body.replace(/\s+/g, " ").trim();
+          } catch { /* skip */ }
+        }
+        return { entry, preview };
+      }),
+    );
+  };
+
+  // --list: print your worklogs and exit
+  if (args.flags["list"]) {
+    const entries = await buildEntries();
+    for (const { entry, preview } of entries) {
+      const avail = Math.max(termCols - 50, 10);
+      const snippet = preview.length > avail ? preview.slice(0, avail - 1) + "\u2026" : preview;
+      log.plain(
+        `${entry.worklogId.padEnd(10)}  ${entry.timeSpent.padEnd(10)}  ${formatShortDate(entry.started).padEnd(14)}  ${snippet}`,
+      );
+    }
+    return;
+  }
+
+  // --id=ID,...: delete directly
+  const idFlag = args.flags["id"];
+  let chosen: WorklogManifestEntry[] = [];
+
+  if (idFlag) {
+    const ids = String(idFlag).split(",").map((s) => s.trim()).filter(Boolean);
+    for (const targetId of ids) {
+      const match = ownWorklogs.find((e) => e.worklogId === targetId);
+      if (!match) {
+        log.error(`Worklog ${targetId} not found among your entries. Use --list to see available.`);
+        process.exit(1);
+      }
+      chosen.push(match);
+    }
+  } else {
+    const entries = await buildEntries();
+
+    const items = entries.map(({ entry, preview }) => {
+      const idStr   = `#${entry.worklogId}`;
+      const timeStr = entry.timeSpent;
+      const dateStr = formatShortDate(entry.started);
+      const ID_W   = 12;
+      const TIME_W = 10;
+      const DATE_W = 14;
+      const prefix = ID_W + TIME_W + DATE_W + 6;
+      const avail  = Math.max(termCols - prefix, 10);
+      const snippet = preview.length > avail ? preview.slice(0, avail - 1) + "\u2026" : preview;
+      return {
+        label: `${idStr.padEnd(ID_W)}${timeStr.padEnd(TIME_W)}${dateStr.padEnd(DATE_W)}  ${snippet}`,
+        value: entry,
+        checked: false,
+      };
+    });
+
+    const { multiSelect } = await import("@/utils/multi-select");
+    const selected = await multiSelect(items, {
+      title: `Delete worklogs on ${issueKey}  (only your entries shown)`,
+    });
+
+    if (!selected || selected.length === 0) {
+      log.dim("Cancelled.");
+      return;
+    }
+    chosen = selected;
+  }
+
+  let deleted = 0;
+  let delErrors = 0;
+
+  for (const entry of chosen) {
+    try {
+      await client.deleteWorklog(issueKey, entry.worklogId);
+      const filePath = join(logsDir, entry.file);
+      if (existsSync(filePath)) await unlink(filePath);
+      manifest.worklogs = manifest.worklogs.filter((e) => e.worklogId !== entry.worklogId);
+      deleted++;
+      log.dim(`  ✓ #${entry.worklogId} deleted`);
+    } catch (err) {
+      delErrors++;
+      const { toMessage } = await import("@/utils/errors");
+      log.error(`  ✗ #${entry.worklogId}: ${toMessage(err)}`);
+    }
+  }
+
+  await saveWorklogManifest(logsDir, manifest);
+  log.success(`Deleted ${deleted} worklog(s)${delErrors > 0 ? `, ${delErrors} error(s)` : ""}.`);
+}
+
+// ---------------------------------------------------------------------------
 // Command definition
 // ---------------------------------------------------------------------------
 
@@ -993,7 +1510,7 @@ export const jiraCommand: Command = {
       handler: handleStatus,
     },
     {
-      name: "boards",
+      name: "ls",
       description: "List available boards",
       handler: handleBoards,
     },
@@ -1021,6 +1538,21 @@ export const jiraCommand: Command = {
       name: "delete-comments",
       description: "Delete your comments  --issue=KEY [--id=ID,...] [--list] [--board=ID]",
       handler: handleDeleteComment,
+    },
+    {
+      name: "pull-logs",
+      description: "Fetch worklogs  --issue=KEY [--board=ID] [--dir=PATH]",
+      handler: handlePullLogs,
+    },
+    {
+      name: "push-logs",
+      description: "Push new/edited worklogs  --issue=KEY [--board=ID] [--dry-run] [--dir=PATH]",
+      handler: handlePushLogs,
+    },
+    {
+      name: "delete-logs",
+      description: "Delete your worklogs  --issue=KEY [--id=ID,...] [--list] [--board=ID]",
+      handler: handleDeleteLogs,
     },
   ],
 };
