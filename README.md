@@ -12,6 +12,8 @@ A fast CLI tool for syncing content between your local file system and self-host
 ## Table of Contents
 
 - [Installation](#installation)
+- [Updating](#updating)
+- [Uninstalling](#uninstalling)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Confluence](#confluence)
@@ -66,6 +68,20 @@ cjvibe update
 ```
 
 This checks GitHub for the latest release, downloads the new binary, and atomically replaces the current one in place. No need to re-run the install script.
+
+### Uninstalling
+
+```bash
+rm ~/.local/bin/cjvibe
+```
+
+Then remove the PATH line that the installer added to your shell rc (`~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish`):
+
+```bash
+# The line looks like:
+export PATH="$HOME/.local/bin:$PATH"  # bash/zsh
+fish_add_path $HOME/.local/bin        # fish
+```
 
 ### Manual download
 
