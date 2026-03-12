@@ -85,7 +85,7 @@ function printTree(
 // ---------------------------------------------------------------------------
 
 /** `cjvibe confluence init` — interactively configure Confluence credentials */
-async function handleInit(_args: ParsedArgs): Promise<void> {
+async function handleInit(args: ParsedArgs): Promise<void> {
   const { select } = await import("@/utils/select");
   const { ConfluenceClient } = await import("@/confluence/client");
 
@@ -121,26 +121,46 @@ async function handleInit(_args: ParsedArgs): Promise<void> {
   }
 
   // ── Step 3: pick default space ───────────────────────────────────────────
-  const spaceItems = spacesResult.results.map((s) => ({
-    label: `${s.key.padEnd(14)} ${s.name}  [${s.type}]`,
-    value: s.key,
-  }));
+  let defaultSpace: string | null = null;
 
-  const defaultSpace = await select(spaceItems, {
-    title: "Default space (used when --space is omitted):",
-    pageSize: 14,
-  });
-
-  if (!defaultSpace) {
-    log.warn("No space selected — skipping default space.");
-  } else {
+  const spaceFlag = args.flags["space"];
+  if (spaceFlag) {
+    // Non-interactive: --space=KEY
+    const key = String(spaceFlag);
+    const match = spacesResult.results.find((s) => s.key === key);
+    if (!match) {
+      log.error(`Space "${key}" not found. Available: ${spacesResult.results.map((s) => s.key).join(", ")}`);
+      process.exit(1);
+    }
+    defaultSpace = key;
     log.success(`Default space: ${defaultSpace}\n`);
+  } else {
+    const spaceItems = spacesResult.results.map((s) => ({
+      label: `${s.key.padEnd(14)} ${s.name}  [${s.type}]`,
+      value: s.key,
+    }));
+
+    defaultSpace = await select(spaceItems, {
+      title: "Default space (used when --space is omitted):",
+      pageSize: 14,
+    });
+
+    if (!defaultSpace) {
+      log.warn("No space selected — skipping default space.");
+    } else {
+      log.success(`Default space: ${defaultSpace}\n`);
+    }
   }
 
   // ── Step 4: pick root page ───────────────────────────────────────────────
   let rootPageId: string | undefined;
 
-  if (defaultSpace) {
+  const rootFlag = args.flags["root-page"];
+  if (rootFlag) {
+    // Non-interactive: --root-page=ID
+    rootPageId = String(rootFlag);
+    log.success(`Root page ID: ${rootPageId}\n`);
+  } else if (defaultSpace) {
     log.plain("Fetching top-level pages for root page selection...");
 
     try {
@@ -401,10 +421,29 @@ async function handlePull(args: ParsedArgs): Promise<void> {
 
   log.info(`${pagesToOffer.length} page(s) available.`);
 
+  // --list: print available pages and exit (for LLMs / scripting)
+  if (args.flags["list"]) {
+    for (const p of pagesToOffer.sort((a, b) => naturalCompare(a.title, b.title))) {
+      log.plain(`${p.id}  v${p.version.number}  ${p.title}`);
+    }
+    return;
+  }
+
   // Determine which pages to pull
   let selectedIds: string[];
 
-  if (forceAll) {
+  const pagesFlag = args.flags["pages"];
+  if (pagesFlag) {
+    // Non-interactive: --pages=ID,ID,...
+    const requested = String(pagesFlag).split(",").map((s) => s.trim()).filter(Boolean);
+    const validSet = new Set(pagesToOffer.map((p) => p.id));
+    const invalid = requested.filter((id) => !validSet.has(id));
+    if (invalid.length > 0) {
+      log.error(`Unknown page IDs: ${invalid.join(", ")}. Use --list to see available pages.`);
+      process.exit(1);
+    }
+    selectedIds = requested;
+  } else if (forceAll) {
     // --all: pull everything
     selectedIds = pagesToOffer.map((p) => p.id);
   } else if (forceSelect || isFirstRun) {
@@ -800,8 +839,16 @@ async function handleRestore(args: ParsedArgs): Promise<void> {
       process.exit(1);
     }
     log.info(`Restoring version ${targetVersionNumber} (current is v${currentRemoteVersion}, HEAD~${stepsBack}).`);
+  } else if (args.flags["version"]) {
+    // Non-interactive: --version=N
+    targetVersionNumber = Number(args.flags["version"]);
+    if (isNaN(targetVersionNumber) || targetVersionNumber < 1 || targetVersionNumber > currentRemoteVersion) {
+      log.error(`Invalid version ${args.flags["version"]}. Current version is v${currentRemoteVersion}.`);
+      process.exit(1);
+    }
+    log.info(`Restoring version ${targetVersionNumber} (current is v${currentRemoteVersion}).`);
   } else {
-    // ── Interactive version picker ─────────────────────────────────────────
+    // ── Fetch version history (needed for --list and interactive picker) ──
     log.plain("Fetching version history...");
     const versions = await client.getVersionHistory(pageId, currentRemoteVersion);
 
@@ -817,6 +864,20 @@ async function handleRestore(args: ParsedArgs): Promise<void> {
     if (allVersions.length <= 1) {
       log.error("No previous versions found for this page.");
       process.exit(1);
+    }
+
+    // --list: print versions and exit (for LLMs / scripting)
+    if (args.flags["list"]) {
+      for (const v of allVersions) {
+        const when = new Date(v.when).toLocaleString("en-GB", {
+          day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+        });
+        const author = v.by?.displayName ?? v.by?.username ?? "unknown";
+        const tag    = v.number === currentRemoteVersion ? "  (current)" : "";
+        const msg    = v.message ? `  "${v.message}"` : "";
+        log.plain(`v${String(v.number).padEnd(4)}  ${when.padEnd(22)}  ${author}${tag}${msg}`);
+      }
+      return;
     }
 
     const DIM_C = "\x1b[2m";
@@ -933,7 +994,7 @@ export const confluenceCommand: Command = {
   subcommands: [
     {
       name: "init",
-      description: "Configure Confluence credentials interactively",
+      description: "Configure Confluence credentials  [--space=KEY] [--root-page=ID]",
       handler: handleInit,
     },
     {
@@ -958,7 +1019,7 @@ export const confluenceCommand: Command = {
     },
     {
       name: "pull",
-      description: "Pull pages as .gcm files  [--space=KEY] [--select] [--all] [--force] [--dir=PATH]",
+      description: "Pull pages as .gcm files  [--space=KEY] [--select] [--all] [--pages=ID,...] [--list] [--force] [--dir=PATH]",
       handler: handlePull,
     },
     {
@@ -968,7 +1029,7 @@ export const confluenceCommand: Command = {
     },
     {
       name: "restore",
-      description: "Restore page to a past version  [HEAD~N] [--file=NAME.gcm | --id=PAGE_ID] [--space=KEY]",
+      description: "Restore page to a past version  [HEAD~N] [--version=N] [--list] [--file=NAME.gcm | --id=PAGE_ID] [--space=KEY]",
       handler: handleRestore,
     },
   ],

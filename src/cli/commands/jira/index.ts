@@ -95,7 +95,7 @@ function issueKeyToFilename(key: string): string {
 // ---------------------------------------------------------------------------
 
 /** `cjvibe jira init` — interactively configure Jira credentials */
-async function handleInit(_args: ParsedArgs): Promise<void> {
+async function handleInit(args: ParsedArgs): Promise<void> {
   const { select } = await import("@/utils/select");
   const { JiraClient } = await import("@/jira/client");
 
@@ -149,23 +149,38 @@ async function handleInit(_args: ParsedArgs): Promise<void> {
 
   if (boards.length > 0) {
     log.info(`${boards.length} board(s) found.\n`);
-    const boardItems = boards.map((b) => ({
-      label: `${String(b.id).padEnd(6)} ${b.name}  [${b.type}]${b.location ? `  ${b.location.projectKey}` : ""}`,
-      value: b.id,
-    }));
 
-    const selected = await select(boardItems, {
-      title: "Default board (used when --board is omitted):",
-      pageSize: 14,
-    });
-
-    if (selected !== null) {
-      const board = boards.find((b) => b.id === selected);
-      defaultBoardId = selected;
-      defaultBoardName = board?.name;
+    const boardFlag = args.flags["board"];
+    if (boardFlag) {
+      // Non-interactive: --board=ID
+      const id = Number(boardFlag);
+      const match = boards.find((b) => b.id === id);
+      if (!match) {
+        log.error(`Board ${id} not found. Available: ${boards.map((b) => `${b.id} (${b.name})`).join(", ")}`);
+        process.exit(1);
+      }
+      defaultBoardId = match.id;
+      defaultBoardName = match.name;
       log.success(`Default board: ${defaultBoardName} (${defaultBoardId})\n`);
     } else {
-      log.dim("No board selected.\n");
+      const boardItems = boards.map((b) => ({
+        label: `${String(b.id).padEnd(6)} ${b.name}  [${b.type}]${b.location ? `  ${b.location.projectKey}` : ""}`,
+        value: b.id,
+      }));
+
+      const selected = await select(boardItems, {
+        title: "Default board (used when --board is omitted):",
+        pageSize: 14,
+      });
+
+      if (selected !== null) {
+        const board = boards.find((b) => b.id === selected);
+        defaultBoardId = selected;
+        defaultBoardName = board?.name;
+        log.success(`Default board: ${defaultBoardName} (${defaultBoardId})\n`);
+      } else {
+        log.dim("No board selected.\n");
+      }
     }
   } else {
     log.warn("No boards found. You can set a board later.");
@@ -803,7 +818,6 @@ async function handleDeleteComment(args: ParsedArgs): Promise<void> {
   const { readFile, unlink } = await import("node:fs/promises");
   const { existsSync } = await import("node:fs");
   const { createJiraClient } = await import("@/jira/client");
-  const { select } = await import("@/utils/select");
 
   const config = await requireSection("jira");
 
@@ -855,58 +869,98 @@ async function handleDeleteComment(args: ParsedArgs): Promise<void> {
 
   const termCols = process.stdout.columns ?? 80;
 
-  const items = await Promise.all(
-    ownComments.map(async (entry) => {
-      const idStr   = `#${entry.commentId}`;
-      const dateStr = formatShortDate(entry.updated);
+  // Helper to build display entries
+  const buildEntries = async () => {
+    return Promise.all(
+      ownComments.map(async (entry) => {
+        let preview = "";
+        const fp = join(commentsDir, entry.file);
+        if (existsSync(fp)) {
+          try {
+            const raw = await readFile(fp, "utf-8");
+            preview = parseCommentFile(raw).body.replace(/\s+/g, " ").trim();
+          } catch { /* skip */ }
+        }
+        return { entry, preview };
+      }),
+    );
+  };
 
-      let preview = "";
-      const filePath = join(commentsDir, entry.file);
-      if (existsSync(filePath)) {
-        try {
-          const raw = await readFile(filePath, "utf-8");
-          preview = parseCommentFile(raw).body.replace(/\s+/g, " ").trim();
-        } catch { /* skip */ }
-      }
-
-      // columns: "#ID          DATE           preview..."
-      const ID_W   = 12;
-      const DATE_W = 14;
-      const prefix = ID_W + DATE_W + 4; // 4 = spaces
-      const avail  = Math.max(termCols - prefix, 10);
+  // --list: print your comments and exit (for LLMs / scripting)
+  if (args.flags["list"]) {
+    const entries = await buildEntries();
+    for (const { entry, preview } of entries) {
+      const avail = Math.max(termCols - 36, 10);
       const snippet = preview.length > avail ? preview.slice(0, avail - 1) + "\u2026" : preview;
-
-      return {
-        label: `${idStr.padEnd(ID_W)}${dateStr.padEnd(DATE_W)}  ${snippet}`,
-        value: entry,
-      };
-    }),
-  );
-
-  const chosen = await select(items, {
-    title: `Delete comment on ${issueKey}  (only your comments shown)`,
-  });
-
-  if (!chosen) {
-    log.dim("Cancelled.");
+      log.plain(`${entry.commentId.padEnd(10)}  ${formatShortDate(entry.updated).padEnd(14)}  ${snippet}`);
+    }
     return;
   }
 
-  try {
-    await client.deleteComment(issueKey, chosen.commentId);
-  } catch (err) {
-    const { toMessage } = await import("@/utils/errors");
-    log.error(`Failed to delete: ${toMessage(err)}`);
-    process.exit(1);
+  // --id=COMMENT_ID,COMMENT_ID,...: delete directly without picker
+  const idFlag = args.flags["id"];
+  let chosen: CommentManifestEntry[] = [];
+
+  if (idFlag) {
+    const ids = String(idFlag).split(",").map((s) => s.trim()).filter(Boolean);
+    for (const targetId of ids) {
+      const match = ownComments.find((e) => e.commentId === targetId);
+      if (!match) {
+        log.error(`Comment ${targetId} not found among your comments. Use --list to see available.`);
+        process.exit(1);
+      }
+      chosen.push(match);
+    }
+  } else {
+    const entries = await buildEntries();
+
+    const items = entries.map(({ entry, preview }) => {
+      const idStr   = `#${entry.commentId}`;
+      const dateStr = formatShortDate(entry.updated);
+      const ID_W   = 12;
+      const DATE_W = 14;
+      const prefix = ID_W + DATE_W + 4;
+      const avail  = Math.max(termCols - prefix, 10);
+      const snippet = preview.length > avail ? preview.slice(0, avail - 1) + "\u2026" : preview;
+      return {
+        label: `${idStr.padEnd(ID_W)}${dateStr.padEnd(DATE_W)}  ${snippet}`,
+        value: entry,
+        checked: false,
+      };
+    });
+
+    const { multiSelect } = await import("@/utils/multi-select");
+    const selected = await multiSelect(items, {
+      title: `Delete comments on ${issueKey}  (only your comments shown)`,
+    });
+
+    if (!selected || selected.length === 0) {
+      log.dim("Cancelled.");
+      return;
+    }
+    chosen = selected;
   }
 
-  const filePath = join(commentsDir, chosen.file);
-  if (existsSync(filePath)) await unlink(filePath);
+  let deleted = 0;
+  let errors = 0;
 
-  manifest.comments = manifest.comments.filter((e) => e.commentId !== chosen.commentId);
+  for (const entry of chosen) {
+    try {
+      await client.deleteComment(issueKey, entry.commentId);
+      const filePath = join(commentsDir, entry.file);
+      if (existsSync(filePath)) await unlink(filePath);
+      manifest.comments = manifest.comments.filter((e) => e.commentId !== entry.commentId);
+      deleted++;
+      log.dim(`  ✓ #${entry.commentId} deleted`);
+    } catch (err) {
+      errors++;
+      const { toMessage } = await import("@/utils/errors");
+      log.error(`  ✗ #${entry.commentId}: ${toMessage(err)}`);
+    }
+  }
+
   await saveCommentManifest(commentsDir, manifest);
-
-  log.success(`Deleted comment #${chosen.commentId}.`);
+  log.success(`Deleted ${deleted} comment(s)${errors > 0 ? `, ${errors} error(s)` : ""}.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -930,7 +984,7 @@ export const jiraCommand: Command = {
   subcommands: [
     {
       name: "init",
-      description: "Configure Jira credentials interactively",
+      description: "Configure Jira credentials  [--board=ID]",
       handler: handleInit,
     },
     {
@@ -965,7 +1019,7 @@ export const jiraCommand: Command = {
     },
     {
       name: "delete-comments",
-      description: "Interactively delete one of your comments  --issue=KEY [--board=ID]",
+      description: "Delete your comments  --issue=KEY [--id=ID,...] [--list] [--board=ID]",
       handler: handleDeleteComment,
     },
   ],
