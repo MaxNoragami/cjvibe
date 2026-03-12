@@ -1,9 +1,8 @@
 import type { Command, ParsedArgs } from "../router";
 import { log } from "@/utils/logger";
 import { CjvibeError } from "@/utils/errors";
-import { existsSync, chmodSync, renameSync, unlinkSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { existsSync, chmodSync, renameSync, unlinkSync, copyFileSync } from "fs";
+import { dirname, join } from "path";
 import pkg from "../../../package.json";
 
 const REPO = "MaxNoragami/cjvibe";
@@ -103,24 +102,40 @@ async function handleUpdate(_args: ParsedArgs): Promise<void> {
   }
 
   const downloadUrl = `https://github.com/${REPO}/releases/download/${latestTag}/${target}`;
-  const tmpPath = join(tmpdir(), `cjvibe-update-${Date.now()}`);
+
+  // Download to the same directory as the binary so rename is always same-device
+  const tmpPath = join(dirname(binaryPath), `.cjvibe-update-${Date.now()}`);
 
   log.info(`Downloading ${latestTag} (${target})...`);
-  await downloadFile(downloadUrl, tmpPath);
+  try {
+    await downloadFile(downloadUrl, tmpPath);
+  } catch (err) {
+    // Clean up partial download
+    if (existsSync(tmpPath)) try { unlinkSync(tmpPath); } catch { /* ignore */ }
+    throw err;
+  }
   chmodSync(tmpPath, 0o755);
 
-  // Atomic swap: rename old → backup, move new → old path
+  // Atomic swap within the same device: new → binary, backup old first
   const backupPath = `${binaryPath}.bak`;
   try {
     renameSync(binaryPath, backupPath);
-  } catch {
-    // If we can't rename (e.g. cross-device), fall through and try writing directly
-  }
-  renameSync(tmpPath, binaryPath);
-
-  // Remove backup if swap succeeded
-  if (existsSync(backupPath)) {
-    try { unlinkSync(backupPath); } catch { /* best effort */ }
+    renameSync(tmpPath, binaryPath);
+    // Clean up backup
+    try { unlinkSync(backupPath); } catch { /* ignore */ }
+  } catch (err: unknown) {
+    // Fallback: copy then unlink (handles any remaining edge cases)
+    try {
+      copyFileSync(tmpPath, binaryPath);
+      chmodSync(binaryPath, 0o755);
+      try { unlinkSync(tmpPath); } catch { /* ignore */ }
+    } catch {
+      // Restore backup if we have it
+      if (existsSync(backupPath) && !existsSync(binaryPath)) {
+        try { renameSync(backupPath, binaryPath); } catch { /* ignore */ }
+      }
+      throw err;
+    }
   }
 
   log.success(`Updated to ${latestTag}. You may need to restart your shell.`);
