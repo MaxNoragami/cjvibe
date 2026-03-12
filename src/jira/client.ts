@@ -9,6 +9,8 @@ import type {
   JiraPaginatedResult,
   JiraSearchResult,
   JiraUser,
+  JiraWorklog,
+  JiraWorklogResult,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -191,6 +193,65 @@ export class JiraClient {
   /** Delete a comment on an issue. */
   async deleteComment(issueKey: string, commentId: string): Promise<void> {
     const res = await fetch(`${this.baseUrl}/rest/api/2/issue/${issueKey}/comment/${commentId}`, {
+      method: "DELETE",
+      headers: { Authorization: this.authHeader, Accept: "application/json" },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new JiraError(`Jira API error ${res.status} ${res.statusText}: ${body}`, res.status);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Worklogs
+  // ---------------------------------------------------------------------------
+
+  /** Fetch all worklogs for an issue (auto-paginates). */
+  async getWorklogs(issueKey: string): Promise<JiraWorklog[]> {
+    const all: JiraWorklog[] = [];
+    let startAt = 0;
+    const max = 100;
+    while (true) {
+      const page = await this.get<JiraWorklogResult>(
+        `/issue/${issueKey}/worklog?startAt=${startAt}&maxResults=${max}`,
+      );
+      all.push(...page.worklogs);
+      if (startAt + page.maxResults >= page.total) break;
+      startAt += max;
+    }
+    return all;
+  }
+
+  /** Create a new worklog entry. Returns the created worklog. */
+  async createWorklog(
+    issueKey: string,
+    timeSpent: string,
+    opts: { comment?: string; started?: string } = {},
+  ): Promise<JiraWorklog> {
+    return this.post<JiraWorklog>(`/issue/${issueKey}/worklog`, {
+      timeSpent,
+      ...(opts.comment ? { comment: opts.comment } : {}),
+      ...(opts.started ? { started: opts.started } : {}),
+    });
+  }
+
+  /** Update an existing worklog. Returns the updated worklog. */
+  async updateWorklog(
+    issueKey: string,
+    worklogId: string,
+    timeSpent: string,
+    opts: { comment?: string; started?: string } = {},
+  ): Promise<JiraWorklog> {
+    return this.put<JiraWorklog>(`/issue/${issueKey}/worklog/${worklogId}`, {
+      timeSpent,
+      ...(opts.comment ? { comment: opts.comment } : {}),
+      ...(opts.started ? { started: opts.started } : {}),
+    });
+  }
+
+  /** Delete a worklog entry. */
+  async deleteWorklog(issueKey: string, worklogId: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/rest/api/2/issue/${issueKey}/worklog/${worklogId}`, {
       method: "DELETE",
       headers: { Authorization: this.authHeader, Accept: "application/json" },
     });
