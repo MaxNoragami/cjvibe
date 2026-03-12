@@ -9,7 +9,11 @@
     "dev": "bun run src/cli/index.ts",
     "build": "bun build src/cli/index.ts --compile --outfile dist/cjvibe",
     "link": "bun link",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "bump": "bun scripts/bump.ts patch",
+    "bump:patch": "bun scripts/bump.ts patch",
+    "bump:minor": "bun scripts/bump.ts minor",
+    "bump:major": "bun scripts/bump.ts major"
   },
   "devDependencies": {
     "@types/node": "latest",

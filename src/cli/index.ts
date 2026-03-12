@@ -1,6 +1,7 @@
 import { Router } from "./router";
 import { confluenceCommand } from "./commands/confluence";
 import { jiraCommand } from "./commands/jira";
+import { updateCommand } from "./commands/update";
 import { log } from "@/utils/logger";
 import { CjvibeError, toMessage } from "@/utils/errors";
 
@@ -13,6 +14,7 @@ async function main(): Promise<void> {
   const router = new Router();
   router.register(confluenceCommand);
   router.register(jiraCommand);
+  router.register(updateCommand);
 
   try {
     await router.run(process.argv.slice(2));
