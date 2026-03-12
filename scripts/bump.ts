@@ -11,6 +11,7 @@
 
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import { execFileSync } from "child_process";
 
 type ReleaseType = "patch" | "minor" | "major";
 
@@ -48,17 +49,8 @@ async function run() {
   const tag = `v${newVersion}`;
   const msg = `chore: bump ${tag}`;
 
-  const commit = Bun.spawnSync(["git", "commit", "-am", msg]);
-  if (commit.exitCode !== 0) {
-    console.error(new TextDecoder().decode(commit.stderr));
-    process.exit(1);
-  }
-
-  const tagCmd = Bun.spawnSync(["git", "tag", tag]);
-  if (tagCmd.exitCode !== 0) {
-    console.error(new TextDecoder().decode(tagCmd.stderr));
-    process.exit(1);
-  }
+  execFileSync("git", ["commit", "-am", msg], { stdio: "inherit" });
+  execFileSync("git", ["tag", tag], { stdio: "inherit" });
 
   console.log(`  tagged ${tag}`);
   console.log(`  run: git push --follow-tags`);
