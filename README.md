@@ -57,6 +57,16 @@ You can override the install directory:
 CJVIBE_INSTALL_DIR=/usr/local/bin curl -fsSL ... | bash
 ```
 
+### Updating
+
+Once installed, update to the latest release with a single command:
+
+```bash
+cjvibe update
+```
+
+This checks GitHub for the latest release, downloads the new binary, and atomically replaces the current one in place. No need to re-run the install script.
+
 ### Manual download
 
 Grab a binary from the [Releases](https://github.com/MaxNoragami/cjvibe/releases) page:
