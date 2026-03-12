@@ -38,6 +38,11 @@ function resolveIssuesDir(args: ParsedArgs): string {
 function issueToMarkdown(issue: JiraIssue, baseUrl: string): string {
   const f = issue.fields;
   const lines: string[] = [];
+  const related = (f.issuelinks ?? [])
+    .map((l) => l.inwardIssue?.key ?? l.outwardIssue?.key)
+    .filter((k): k is string => Boolean(k))
+    .filter((k) => k !== issue.key);
+  const uniqueRelated = Array.from(new Set(related)).sort();
 
   // Front-matter
   lines.push("---");
@@ -51,6 +56,7 @@ function issueToMarkdown(issue: JiraIssue, baseUrl: string): string {
   lines.push(`reporter: ${f.reporter?.displayName ?? "Unknown"}`);
   lines.push(`project: ${f.project.key}`);
   lines.push(`epic: ${f.epic?.key ?? "None"}`);
+  lines.push(`related_issues: ${uniqueRelated.length > 0 ? uniqueRelated.join(", ") : "None"}`);
   lines.push(`created: ${f.created}`);
   lines.push(`updated: ${f.updated}`);
   if (f.labels.length > 0) lines.push(`labels: ${f.labels.join(", ")}`);
@@ -330,6 +336,7 @@ interface FrontMatter {
   priority: string;
   assignee: string;
   epic: string;
+  relatedIssues: string;
   labels: string;
   description: string;
 }
@@ -363,9 +370,24 @@ function parseIssueMd(content: string): FrontMatter | null {
     priority: get("priority"),
     assignee: get("assignee"),
     epic: get("epic"),
+    relatedIssues: get("related_issues"),
     labels: get("labels"),
     description: desc,
   };
+}
+
+function parseRelatedIssues(raw: string, selfKey: string): Set<string> {
+  const self = selfKey.toUpperCase();
+  const value = (raw ?? "").trim();
+  if (value === "" || value.toLowerCase() === "none") return new Set<string>();
+
+  const keys = value
+    .split(",")
+    .map((k) => k.trim().toUpperCase())
+    .filter(Boolean)
+    .filter((k) => k !== self);
+
+  return new Set(keys);
 }
 
 /** `cjvibe jira push` — push local issue changes back to Jira */
@@ -406,6 +428,9 @@ async function handlePushIssues(args: ParsedArgs): Promise<void> {
     return;
   }
 
+  const localRecords: Array<{ file: string; local: FrontMatter }> = [];
+  const desiredRelatedByIssue = new Map<string, Set<string>>();
+
   let pushed = 0;
   let skipped = 0;
   let errors = 0;
@@ -419,6 +444,16 @@ async function handlePushIssues(args: ParsedArgs): Promise<void> {
       skipped++;
       continue;
     }
+
+    localRecords.push({ file, local });
+    desiredRelatedByIssue.set(
+      local.key.toUpperCase(),
+      parseRelatedIssues(local.relatedIssues ?? "", local.key),
+    );
+  }
+
+  for (const record of localRecords) {
+    const { file, local } = record;
 
     // Fetch remote issue to diff
     let remote: import("@/jira/types").JiraIssue;
@@ -532,6 +567,40 @@ async function handlePushIssues(args: ParsedArgs): Promise<void> {
       }
     }
 
+    // --- related issues (issue links) ---
+    const remoteLinks = (rf.issuelinks ?? [])
+      .map((link) => ({
+        id: link.id,
+        key: link.inwardIssue?.key ?? link.outwardIssue?.key,
+      }))
+      .filter((entry): entry is { id: string; key: string } => Boolean(entry.key));
+
+    const remoteRelatedSet = new Set(
+      remoteLinks
+        .map((l) => l.key)
+        .filter((k) => k !== local.key)
+        .map((k) => k.toUpperCase()),
+    );
+
+    const localRelatedSet = parseRelatedIssues(local.relatedIssues ?? "", local.key);
+
+    const toAdd = Array.from(localRelatedSet).filter((k) => !remoteRelatedSet.has(k));
+    const toRemove = Array.from(remoteRelatedSet).filter((k) => {
+      if (localRelatedSet.has(k)) return false;
+      const counterpartDesired = desiredRelatedByIssue.get(k);
+      if (counterpartDesired?.has(local.key.toUpperCase())) {
+        return false;
+      }
+      return true;
+    });
+
+    for (const k of toAdd) {
+      changes.push(`related: +${k}`);
+    }
+    for (const k of toRemove) {
+      changes.push(`related: -${k}`);
+    }
+
     // --- labels ---
     const remoteLabels = rf.labels.join(", ");
     if (local.labels && local.labels !== remoteLabels) {
@@ -582,6 +651,38 @@ async function handlePushIssues(args: ParsedArgs): Promise<void> {
         log.error(`  ✗ field update failed: ${toMessage(err)}`);
         errors++;
         continue;
+      }
+    }
+
+    // Push related issue link diffs
+    if (toAdd.length > 0 || toRemove.length > 0) {
+      for (const k of toAdd) {
+        try {
+          await client.createIssueLink(local.key, k, "Relates");
+        } catch (err) {
+          const { toMessage } = await import("@/utils/errors");
+          log.warn(`  ⚠ related +${k} failed: ${toMessage(err)}`);
+        }
+      }
+
+      const linksByKey = new Map<string, string[]>();
+      for (const link of remoteLinks) {
+        const key = link.key.toUpperCase();
+        const arr = linksByKey.get(key) ?? [];
+        arr.push(link.id);
+        linksByKey.set(key, arr);
+      }
+
+      for (const k of toRemove) {
+        const ids = linksByKey.get(k) ?? [];
+        for (const id of ids) {
+          try {
+            await client.deleteIssueLink(id);
+          } catch (err) {
+            const { toMessage } = await import("@/utils/errors");
+            log.warn(`  ⚠ related -${k} failed: ${toMessage(err)}`);
+          }
+        }
       }
     }
 

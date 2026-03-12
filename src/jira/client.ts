@@ -162,7 +162,7 @@ export class JiraClient {
     const jql = opts.assignee ? `assignee=${opts.assignee}` : "";
 
     while (true) {
-      const fields = "summary,status,assignee,reporter,issuetype,priority,project,created,updated,description,epic,labels,components,fixVersions,parent,subtasks";
+      const fields = "summary,status,assignee,reporter,issuetype,priority,project,created,updated,description,epic,issuelinks,labels,components,fixVersions,parent,subtasks";
       let path = `/board/${boardId}/issue?startAt=${startAt}&maxResults=${max}&fields=${fields}`;
       if (jql) path += `&jql=${encodeURIComponent(jql)}`;
       const page = await this.get<JiraSearchResult>(path, "agile");
@@ -175,7 +175,7 @@ export class JiraClient {
 
   /** Get a single issue by key. */
   async getIssue(key: string): Promise<JiraIssue> {
-    const fields = "summary,status,assignee,reporter,issuetype,priority,project,created,updated,description,epic,labels,components,fixVersions,parent,subtasks";
+    const fields = "summary,status,assignee,reporter,issuetype,priority,project,created,updated,description,epic,issuelinks,labels,components,fixVersions,parent,subtasks";
     return this.get<JiraIssue>(`/issue/${key}?fields=${fields}`);
   }
 
@@ -270,6 +270,42 @@ export class JiraClient {
    */
   async findUsers(query: string): Promise<JiraUser[]> {
     return this.get<JiraUser[]>(`/user/search?username=${encodeURIComponent(query)}`);
+  }
+
+  /** Create an issue link (defaults to Jira's 'Relates' type). */
+  async createIssueLink(issueKey: string, relatedIssueKey: string, linkType = "Relates"): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/rest/api/2/issueLink`, {
+      method: "POST",
+      headers: {
+        Authorization: this.authHeader,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        type: { name: linkType },
+        inwardIssue: { key: issueKey },
+        outwardIssue: { key: relatedIssueKey },
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new JiraError(`Issue link create failed ${res.status} ${res.statusText}: ${body}`, res.status);
+    }
+  }
+
+  /** Delete an issue link by Jira issueLink id. */
+  async deleteIssueLink(linkId: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/rest/api/2/issueLink/${linkId}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: this.authHeader,
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new JiraError(`Issue link delete failed ${res.status} ${res.statusText}: ${body}`, res.status);
+    }
   }
 
   // ---------------------------------------------------------------------------

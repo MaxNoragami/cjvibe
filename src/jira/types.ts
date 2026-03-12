@@ -59,6 +59,20 @@ export interface JiraEpic {
   done?: boolean;
 }
 
+export interface JiraIssueLinkType {
+  id: string;
+  name: string;
+  inward: string;
+  outward: string;
+}
+
+export interface JiraIssueLink {
+  id: string;
+  type: JiraIssueLinkType;
+  inwardIssue?: { key: string };
+  outwardIssue?: { key: string };
+}
+
 export interface JiraIssueFields {
   summary: string;
   status: JiraStatus;
@@ -71,6 +85,7 @@ export interface JiraIssueFields {
   updated: string;
   description: string | null;
   epic?: JiraEpic | null;
+  issuelinks?: JiraIssueLink[];
   labels: string[];
   components: JiraComponent[];
   fixVersions: JiraFixVersion[];
