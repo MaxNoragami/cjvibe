@@ -36,6 +36,21 @@ export interface ConfluenceConfig {
   jiraServerId?: string;
 }
 
+export interface JiraConfig {
+  /** Base URL of your Jira instance, e.g. https://jira.example.com */
+  baseUrl: string;
+  /** Jira username / email */
+  username: string;
+  /** Personal access token (Bearer) or API token (Basic) */
+  token: string;
+  /** Auth method. Defaults to "bearer" (Jira Server / Data Center PATs). */
+  authMethod?: AuthMethod;
+  /** Default board ID to operate on */
+  defaultBoardId?: number;
+  /** Default board name (for display) */
+  defaultBoardName?: string;
+}
+
 /** Tracks which pages are synced and their last-known state. */
 export interface SyncManifestEntry {
   /** Confluence page ID */
@@ -61,7 +76,7 @@ export interface SyncManifest {
 
 export interface Config {
   confluence?: ConfluenceConfig;
-  // jira?: JiraConfig  — reserved for future use
+  jira?: JiraConfig;
 }
 
 // ---------------------------------------------------------------------------

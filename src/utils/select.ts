@@ -71,7 +71,7 @@ export async function select<T>(
 
     // ── header ──
     buf.push(moveTo(1));
-    buf.push(clrEos);
+    buf.push(clrAll);
     buf.push(`${BOLD}${CYAN}${title}${RESET}  ${DIM}↑↓ navigate · Enter select · Esc cancel${RESET}`);
     buf.push("\n");
 

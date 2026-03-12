@@ -330,7 +330,7 @@ function resolvePagesDir(args: ParsedArgs): string {
   const { join } = require("node:path") as typeof import("node:path");
   const dir = args.flags["dir"];
   if (typeof dir === "string" && dir) return dir;
-  return join(process.cwd(), "pages");
+  return join(process.cwd(), "cjdata", "pages");
 }
 
 /**

@@ -63,7 +63,7 @@ export async function multiSelect<T>(
   function render() {
     const buf: string[] = [];
     buf.push(moveTo(1));
-    buf.push(clrEos);
+    buf.push(clrAll);
     buf.push(
       `${BOLD}${CYAN}${title}${RESET}  ` +
       `${DIM}↑↓ navigate · Space toggle · a all · n none · Enter confirm · Esc cancel${RESET}`,
