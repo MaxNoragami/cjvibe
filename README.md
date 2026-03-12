@@ -468,6 +468,7 @@ assignee: John Doe
 reporter: Jane Smith
 project: GMS
 epic: GMS-1
+related_issues: GMS-23, GMS-33
 created: 2026-03-05T12:33:52.000+0100
 updated: 2026-03-12T00:47:25.000+0100
 url: http://jira.example.com/browse/GMS-20
@@ -502,6 +503,7 @@ cjvibe jira push --dry-run
 | `priority` | Matched by name (`Highest`, `High`, `Medium`, `Low`, `Lowest`) |
 | `assignee` | Resolved from display name via user search; set to `Unassigned` to clear |
 | `epic` | Assign by Epic key (`PROJ-123`) or by exact epic name/summary on the board; set to `None` to clear |
+| `related_issues` | Comma-separated issue keys (e.g. `GMS-23, GMS-33`). `None` clears all related links |
 | `labels` | Comma-separated list, replaces all existing labels |
 | `description` | Body text under the `## Description` section |
 | `status` | Applied via Jira workflow transition by target status name. Works only if that status is directly reachable from the current state |
