@@ -30,6 +30,7 @@ A fast CLI tool for syncing content between your local file system and self-host
   - [jira status](#jira-status)
   - [jira ls](#jira-ls)
   - [jira pull](#jira-pull)
+  - [jira push](#jira-push)
   - [jira clean](#jira-clean)
   - [jira pull-comments](#jira-pull-comments)
   - [jira push-comments](#jira-push-comments)
@@ -472,6 +473,58 @@ url: http://jira.example.com/browse/GMS-20
 ---
 
 (issue description body in markdown)
+```
+
+---
+
+### jira push
+
+Push local issue changes back to Jira. Detected by diffing the local `.md` front-matter against the live remote issue — only changed fields are sent.
+
+```bash
+cjvibe jira push
+cjvibe jira push --board=78
+cjvibe jira push --dry-run
+```
+
+| Flag | Description |
+|---|---|
+| `--board=ID` | Board ID override |
+| `--dry-run` | Show what would change without pushing |
+| `--dir=PATH` | Custom directory |
+
+**Editable fields:**
+
+| Front-matter field | Behaviour |
+|---|---|
+| `summary` | Updated directly |
+| `priority` | Matched by name (`Highest`, `High`, `Medium`, `Low`, `Lowest`) |
+| `assignee` | Resolved from display name via user search; set to `Unassigned` to clear |
+| `labels` | Comma-separated list, replaces all existing labels |
+| `description` | Body text under the `## Description` section |
+| `status` | Applied via Jira workflow transition — only works if the target status is reachable from the current one |
+
+**Read-only fields** (changes are ignored): `key`, `id`, `type`, `reporter`, `project`, `created`, `updated`, `url`, `parent`, subtasks.
+
+Example — change summary and reassign:
+
+```markdown
+---
+key: GMS-20
+summary: Dashboard auto-refresh with staleness warning   # edited
+assignee: Jane Smith                                      # edited
+status: In Progress                                       # triggers transition
+...
+---
+```
+
+```bash
+cjvibe jira push
+# GMS-20:
+#   summary: "Dashboard auto-refresh..." → "Dashboard auto-refresh with staleness warning"
+#   assignee: Adrian Vremere → Jane Smith
+#   status: Proposed → In Progress
+#   ✓ updated
 ```
 
 ---
@@ -1004,6 +1057,7 @@ cjvibe jira init --board=78
 | `confluence restore` | `--version=N` | Restore specific version |
 | `confluence restore` | `HEAD~N` | Restore N versions back |
 | `jira init` | `--board=ID` | Skip board picker |
+| `jira push` | `--dry-run` | Preview changes without pushing |
 | `jira delete-comments` | `--list` | List deletable comments |
 | `jira delete-comments` | `--id=ID,...` | Delete by comment ID |
 | `jira delete-logs` | `--list` | List deletable worklogs |
