@@ -317,6 +317,241 @@ async function handlePull(args: ParsedArgs): Promise<void> {
   log.success(`Pull complete: ${written} issue(s) written to ${boardDir}`);
 }
 
+// ---------------------------------------------------------------------------
+// Push issues
+// ---------------------------------------------------------------------------
+
+interface FrontMatter {
+  key: string;
+  summary: string;
+  type: string;
+  status: string;
+  priority: string;
+  assignee: string;
+  labels: string;
+  description: string;
+}
+
+/** Parse a .md issue file into front-matter fields + body */
+function parseIssueMd(content: string): FrontMatter | null {
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!fmMatch) return null;
+
+  const [, header, body] = fmMatch as [string, string, string];
+  const get = (key: string): string => {
+    const m = header.match(new RegExp(`^${key}:\\s*(.*)$`, "m"));
+    return m?.[1]?.trim() ?? "";
+  };
+
+  // Body: strip the "# KEY: Summary" title line and "## Description" heading
+  let desc = body.trim();
+  // Remove title line
+  desc = desc.replace(/^#\s+\S+:.*\n*/, "");
+  // Remove ## Description heading
+  desc = desc.replace(/^##\s+Description\s*\n*/, "");
+  // Remove ## Subtasks and everything after
+  desc = desc.replace(/\n##\s+Subtasks[\s\S]*$/, "");
+  desc = desc.trim();
+
+  return {
+    key: get("key"),
+    summary: get("summary"),
+    type: get("type"),
+    status: get("status"),
+    priority: get("priority"),
+    assignee: get("assignee"),
+    labels: get("labels"),
+    description: desc,
+  };
+}
+
+/** `cjvibe jira push` — push local issue changes back to Jira */
+async function handlePushIssues(args: ParsedArgs): Promise<void> {
+  const { join } = await import("node:path");
+  const { readdir, readFile } = await import("node:fs/promises");
+  const { existsSync } = await import("node:fs");
+  const { createJiraClient } = await import("@/jira/client");
+
+  const config = await requireSection("jira");
+  const dryRun = Boolean(args.flags["dry-run"]);
+
+  const boardId = args.flags["board"]
+    ? Number(args.flags["board"])
+    : config.defaultBoardId;
+
+  if (!boardId) {
+    log.error("No board specified. Use --board=ID or set a default.");
+    process.exit(1);
+  }
+
+  const issuesDir = resolveIssuesDir(args);
+  const boardDir = join(issuesDir, String(boardId));
+
+  if (!existsSync(boardDir)) {
+    log.error(`No issues directory found at ${boardDir}. Pull issues first.`);
+    process.exit(1);
+  }
+
+  const client = await createJiraClient();
+
+  // Read all .md files in the board dir (not subdirs)
+  const files = (await readdir(boardDir)).filter((f) => f.endsWith(".md"));
+  if (files.length === 0) {
+    log.info("No issue files found.");
+    return;
+  }
+
+  let pushed = 0;
+  let skipped = 0;
+  let errors = 0;
+
+  for (const file of files) {
+    const filePath = join(boardDir, file);
+    const content = await readFile(filePath, "utf-8");
+    const local = parseIssueMd(content);
+    if (!local || !local.key) {
+      log.dim(`  ✗ ${file} — could not parse front-matter, skipping`);
+      skipped++;
+      continue;
+    }
+
+    // Fetch remote issue to diff
+    let remote: import("@/jira/types").JiraIssue;
+    try {
+      remote = await client.getIssue(local.key);
+    } catch (err) {
+      const { toMessage } = await import("@/utils/errors");
+      log.error(`  ✗ ${local.key}: ${toMessage(err)}`);
+      errors++;
+      continue;
+    }
+
+    const rf = remote.fields;
+    const changes: string[] = [];
+    const fields: Record<string, unknown> = {};
+
+    // --- summary ---
+    if (local.summary && local.summary !== rf.summary) {
+      fields["summary"] = local.summary;
+      changes.push(`summary: "${rf.summary}" → "${local.summary}"`);
+    }
+
+    // --- priority ---
+    const remotePriority = rf.priority?.name ?? "None";
+    if (local.priority && local.priority !== remotePriority) {
+      fields["priority"] = { name: local.priority };
+      changes.push(`priority: ${remotePriority} → ${local.priority}`);
+    }
+
+    // --- assignee ---
+    const remoteAssignee = rf.assignee?.displayName ?? "Unassigned";
+    if (local.assignee && local.assignee !== remoteAssignee) {
+      if (local.assignee === "Unassigned") {
+        fields["assignee"] = null;
+        changes.push(`assignee: ${remoteAssignee} → Unassigned`);
+      } else {
+        // Resolve display name to user key
+        try {
+          const users = await client.findUsers(local.assignee);
+          const match = users.find(
+            (u) =>
+              u.displayName.toLowerCase() === local.assignee.toLowerCase() ||
+              u.name.toLowerCase() === local.assignee.toLowerCase(),
+          );
+          if (match) {
+            fields["assignee"] = { name: match.name };
+            changes.push(`assignee: ${remoteAssignee} → ${match.displayName}`);
+          } else {
+            log.warn(`  ⚠ ${local.key}: user "${local.assignee}" not found, skipping assignee change`);
+          }
+        } catch {
+          log.warn(`  ⚠ ${local.key}: could not search users for "${local.assignee}"`);
+        }
+      }
+    }
+
+    // --- labels ---
+    const remoteLabels = rf.labels.join(", ");
+    if (local.labels && local.labels !== remoteLabels) {
+      const newLabels = local.labels.split(",").map((l) => l.trim()).filter(Boolean);
+      fields["labels"] = newLabels;
+      changes.push(`labels: [${remoteLabels}] → [${newLabels.join(", ")}]`);
+    }
+
+    // --- description ---
+    const remoteDesc = (rf.description ?? "").trim();
+    if (local.description && local.description !== remoteDesc) {
+      fields["description"] = local.description;
+      const preview = local.description.slice(0, 60).replace(/\n/g, " ");
+      changes.push(`description: updated (${preview}…)`);
+    }
+
+    // --- status (via transition, not field edit) ---
+    let statusChange: string | null = null;
+    if (local.status && local.status !== rf.status.name) {
+      statusChange = local.status;
+    }
+
+    if (changes.length === 0 && !statusChange) {
+      skipped++;
+      continue;
+    }
+
+    // Print what we're doing
+    log.info(`${BOLD}${local.key}${RESET}:`);
+    for (const c of changes) {
+      log.dim(`  ${c}`);
+    }
+    if (statusChange) {
+      log.dim(`  status: ${rf.status.name} → ${statusChange}`);
+    }
+
+    if (dryRun) {
+      pushed++;
+      continue;
+    }
+
+    // Push field changes
+    if (Object.keys(fields).length > 0) {
+      try {
+        await client.updateIssue(local.key, fields);
+      } catch (err) {
+        const { toMessage } = await import("@/utils/errors");
+        log.error(`  ✗ field update failed: ${toMessage(err)}`);
+        errors++;
+        continue;
+      }
+    }
+
+    // Push status transition
+    if (statusChange) {
+      try {
+        const ok = await client.transitionIssue(local.key, statusChange);
+        if (!ok) {
+          log.warn(`  ⚠ transition to "${statusChange}" not available (check workflow)`);
+        }
+      } catch (err) {
+        const { toMessage } = await import("@/utils/errors");
+        log.warn(`  ⚠ transition failed: ${toMessage(err)}`);
+      }
+    }
+
+    pushed++;
+    log.dim(`  ✓ updated`);
+  }
+
+  log.plain("");
+  if (dryRun) {
+    log.success(`Dry run: ${pushed} issue(s) would be updated, ${skipped} unchanged.`);
+  } else {
+    log.success(
+      `Push complete: ${pushed} issue(s) updated, ${skipped} unchanged` +
+        (errors > 0 ? `, ${errors} error(s)` : "") +
+        ".",
+    );
+  }
+}
+
 /** `cjvibe jira clean` — remove issue files from local */
 async function handleClean(args: ParsedArgs): Promise<void> {
   const { join } = await import("node:path");
@@ -1518,6 +1753,11 @@ export const jiraCommand: Command = {
       name: "pull",
       description: "Fetch issues from a board  [--board=ID] [--all] [--dir=PATH]",
       handler: handlePull,
+    },
+    {
+      name: "push",
+      description: "Push local issue changes  [--board=ID] [--dry-run] [--dir=PATH]",
+      handler: handlePushIssues,
     },
     {
       name: "clean",

@@ -160,6 +160,65 @@ export class JiraClient {
     return this.get<JiraIssue>(`/issue/${key}`);
   }
 
+  /**
+   * Update issue fields via the Jira edit endpoint.
+   * `fields` is a partial map of field-name → value, matching Jira's
+   * PUT /rest/api/2/issue/{key} body.
+   */
+  async updateIssue(key: string, fields: Record<string, unknown>): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/rest/api/2/issue/${key}`, {
+      method: "PUT",
+      headers: {
+        Authorization: this.authHeader,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ fields }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new JiraError(`Jira API error ${res.status} ${res.statusText}: ${body}`, res.status);
+    }
+  }
+
+  /**
+   * Transition an issue to a new status by name.
+   * Fetches available transitions, matches by name, and executes.
+   * Returns true if transition was performed, false if status name not found.
+   */
+  async transitionIssue(key: string, statusName: string): Promise<boolean> {
+    const data = await this.get<{ transitions: { id: string; name: string }[] }>(
+      `/issue/${key}/transitions`,
+    );
+    const target = data.transitions.find(
+      (t) => t.name.toLowerCase() === statusName.toLowerCase(),
+    );
+    if (!target) return false;
+
+    const res = await fetch(`${this.baseUrl}/rest/api/2/issue/${key}/transitions`, {
+      method: "POST",
+      headers: {
+        Authorization: this.authHeader,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ transition: { id: target.id } }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new JiraError(`Transition failed ${res.status}: ${body}`, res.status);
+    }
+    return true;
+  }
+
+  /**
+   * Search users by display name or username.
+   * Returns matching JiraUser entries.
+   */
+  async findUsers(query: string): Promise<JiraUser[]> {
+    return this.get<JiraUser[]>(`/user/search?username=${encodeURIComponent(query)}`);
+  }
+
   // ---------------------------------------------------------------------------
   // Comments
   // ---------------------------------------------------------------------------
