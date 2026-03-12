@@ -51,6 +51,14 @@ export interface JiraFixVersion {
   released: boolean;
 }
 
+export interface JiraEpic {
+  id: number | string;
+  key: string;
+  name?: string;
+  summary?: string;
+  done?: boolean;
+}
+
 export interface JiraIssueFields {
   summary: string;
   status: JiraStatus;
@@ -62,6 +70,7 @@ export interface JiraIssueFields {
   created: string;
   updated: string;
   description: string | null;
+  epic?: JiraEpic | null;
   labels: string[];
   components: JiraComponent[];
   fixVersions: JiraFixVersion[];

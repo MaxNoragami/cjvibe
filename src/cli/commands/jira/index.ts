@@ -50,6 +50,7 @@ function issueToMarkdown(issue: JiraIssue, baseUrl: string): string {
   lines.push(`assignee: ${f.assignee?.displayName ?? "Unassigned"}`);
   lines.push(`reporter: ${f.reporter?.displayName ?? "Unknown"}`);
   lines.push(`project: ${f.project.key}`);
+  lines.push(`epic: ${f.epic?.key ?? "None"}`);
   lines.push(`created: ${f.created}`);
   lines.push(`updated: ${f.updated}`);
   if (f.labels.length > 0) lines.push(`labels: ${f.labels.join(", ")}`);
@@ -328,6 +329,7 @@ interface FrontMatter {
   status: string;
   priority: string;
   assignee: string;
+  epic: string;
   labels: string;
   description: string;
 }
@@ -360,6 +362,7 @@ function parseIssueMd(content: string): FrontMatter | null {
     status: get("status"),
     priority: get("priority"),
     assignee: get("assignee"),
+    epic: get("epic"),
     labels: get("labels"),
     description: desc,
   };
@@ -393,6 +396,8 @@ async function handlePushIssues(args: ParsedArgs): Promise<void> {
   }
 
   const client = await createJiraClient();
+  let epicLinkFieldId: string | null | undefined;
+  let boardEpics: { key: string; name?: string; summary?: string }[] | null = null;
 
   // Read all .md files in the board dir (not subdirs)
   const files = (await readdir(boardDir)).filter((f) => f.endsWith(".md"));
@@ -466,6 +471,63 @@ async function handlePushIssues(args: ParsedArgs): Promise<void> {
           }
         } catch {
           log.warn(`  ⚠ ${local.key}: could not search users for "${local.assignee}"`);
+        }
+      }
+    }
+
+    // --- epic ---
+    if (epicLinkFieldId === undefined) {
+      try {
+        epicLinkFieldId = await client.getEpicLinkFieldId(local.key);
+      } catch {
+        epicLinkFieldId = null;
+      }
+    }
+
+    let remoteEpic = rf.epic?.key ?? "None";
+    if (remoteEpic === "None" && epicLinkFieldId) {
+      try {
+        const rawEpic = await client.getIssueFieldValue(local.key, epicLinkFieldId);
+        if (typeof rawEpic === "string" && rawEpic.trim()) {
+          remoteEpic = rawEpic.trim();
+        }
+      } catch {
+        // keep fallback value
+      }
+    }
+
+    if (local.epic) {
+      const requested = local.epic.trim();
+      let desiredEpic = "None";
+
+      if (requested !== "" && requested.toLowerCase() !== "none") {
+        desiredEpic = requested;
+        const looksLikeKey = /^[A-Z][A-Z0-9_]+-\d+$/.test(requested);
+
+        if (!looksLikeKey) {
+          if (!boardEpics) {
+            try {
+              boardEpics = await client.listBoardEpics(boardId);
+            } catch {
+              boardEpics = [];
+            }
+          }
+          const match = boardEpics.find(
+            (e) =>
+              (e.name ?? "").toLowerCase() === requested.toLowerCase() ||
+              (e.summary ?? "").toLowerCase() === requested.toLowerCase(),
+          );
+          if (match?.key) desiredEpic = match.key;
+        }
+      }
+
+      const sameEpic = desiredEpic.toLowerCase() === remoteEpic.toLowerCase();
+      if (!sameEpic) {
+        if (!epicLinkFieldId) {
+          log.warn(`  ⚠ ${local.key}: Epic Link field not available for this project/issue type`);
+        } else {
+          fields[epicLinkFieldId] = desiredEpic === "None" ? null : desiredEpic;
+          changes.push(`epic: ${remoteEpic} → ${desiredEpic}`);
         }
       }
     }
@@ -1759,7 +1821,7 @@ export const jiraCommand: Command = {
     },
     {
       name: "push",
-      description: "Push local issue changes  [--board=ID] [--dry-run] [--dir=PATH]",
+      description: "Push local issue changes (incl. epic)  [--board=ID] [--dry-run] [--dir=PATH]",
       handler: handlePushIssues,
     },
     {
