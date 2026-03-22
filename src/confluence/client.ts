@@ -1,6 +1,7 @@
 import type { ConfluenceConfig } from "@/config/types";
 import { ConfluenceError } from "@/utils/errors";
 import type {
+  ConfluenceAttachment,
   ConfluencePage,
   ConfluencePageSummary,
   ConfluenceSpace,
@@ -290,6 +291,127 @@ export class ConfluenceClient {
     return this.get<ConfluencePage>(
       `/content/${pageId}?version=${versionNumber}&expand=body.storage,version,ancestors,_links,space`,
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Attachments
+  // ---------------------------------------------------------------------------
+
+  /** List all attachments on a page. */
+  async listAttachments(pageId: string): Promise<ConfluenceAttachment[]> {
+    const all: ConfluenceAttachment[] = [];
+    const BATCH = 100;
+    let start = 0;
+
+    while (true) {
+      const batch = await this.get<PaginatedResult<ConfluenceAttachment>>(
+        `/content/${pageId}/child/attachment?limit=${BATCH}&start=${start}&expand=version`,
+      );
+      all.push(...batch.results);
+      if (batch.results.length < BATCH) break;
+      start += BATCH;
+    }
+
+    return all;
+  }
+
+  /**
+   * Download an attachment binary by its relative download path.
+   * The path comes from `attachment._links.download`.
+   */
+  async downloadAttachment(downloadPath: string): Promise<ArrayBuffer> {
+    // Download paths are relative to the base URL, not the REST API path.
+    const url = `${this.baseUrl}${downloadPath}`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: this.authHeader,
+      },
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new ConfluenceError(
+        `Confluence download error ${res.status} ${res.statusText}: ${body}`,
+        res.status,
+      );
+    }
+
+    return res.arrayBuffer();
+  }
+
+  /**
+   * Upload a new attachment to a page.
+   * If an attachment with the same filename already exists, Confluence
+   * creates a new version of it automatically.
+   */
+  async uploadAttachment(params: {
+    pageId: string;
+    filename: string;
+    data: ArrayBuffer | Uint8Array;
+    mediaType?: string;
+  }): Promise<ConfluenceAttachment> {
+    const form = new FormData();
+    const blob = new Blob([params.data], { type: params.mediaType ?? "application/octet-stream" });
+    form.append("file", blob, params.filename);
+
+    const url = `${this.baseUrl}/rest/api/content/${params.pageId}/child/attachment`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: this.authHeader,
+        "X-Atlassian-Token": "nocheck",
+      },
+      body: form,
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new ConfluenceError(
+        `Confluence upload error ${res.status} ${res.statusText}: ${body}`,
+        res.status,
+      );
+    }
+
+    const result = (await res.json()) as PaginatedResult<ConfluenceAttachment>;
+    return result.results[0]!;
+  }
+
+  /**
+   * Update an existing attachment's binary data.
+   * Uses POST to .../data endpoint which replaces the attachment content
+   * and increments the attachment version.
+   */
+  async updateAttachmentData(params: {
+    pageId: string;
+    attachmentId: string;
+    filename: string;
+    data: ArrayBuffer | Uint8Array;
+    mediaType?: string;
+  }): Promise<ConfluenceAttachment> {
+    const form = new FormData();
+    const blob = new Blob([params.data], { type: params.mediaType ?? "application/octet-stream" });
+    form.append("file", blob, params.filename);
+
+    const url =
+      `${this.baseUrl}/rest/api/content/${params.pageId}/child/attachment/${params.attachmentId}/data`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: this.authHeader,
+        "X-Atlassian-Token": "nocheck",
+      },
+      body: form,
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new ConfluenceError(
+        `Confluence attachment update error ${res.status} ${res.statusText}: ${body}`,
+        res.status,
+      );
+    }
+
+    return (await res.json()) as ConfluenceAttachment;
   }
 
   // ---------------------------------------------------------------------------

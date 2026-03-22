@@ -80,6 +80,30 @@ export interface PageVersionResult {
 }
 
 // ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+/** Attachment metadata as returned by /rest/api/content/{id}/child/attachment */
+export interface ConfluenceAttachment {
+  id: string;
+  /** Filename of the attachment */
+  title: string;
+  /** MIME type, e.g. "image/png", "application/pdf" */
+  mediaType: string;
+  /** Size in bytes */
+  fileSize: number;
+  type: "attachment";
+  status: string;
+  version: ApiVersion;
+  _links: {
+    /** Relative download path, e.g. /download/attachments/12345/file.png */
+    download: string;
+    webui: string;
+    self: string;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Derived / local types
 // ---------------------------------------------------------------------------
 

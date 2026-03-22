@@ -51,6 +51,18 @@ export interface JiraConfig {
   defaultBoardName?: string;
 }
 
+/** Tracks a single attachment synced alongside a page. */
+export interface AttachmentManifestEntry {
+  /** Confluence attachment ID */
+  attachmentId: string;
+  /** Filename (same as on Confluence) */
+  filename: string;
+  /** SHA-256 hash of the local binary at last sync */
+  hash: string;
+  /** Attachment version number at last sync */
+  version: number;
+}
+
 /** Tracks which pages are synced and their last-known state. */
 export interface SyncManifestEntry {
   /** Confluence page ID */
@@ -61,8 +73,10 @@ export interface SyncManifestEntry {
   version: number;
   /** SHA-256 hash of the local .gcm file content at last sync */
   hash: string;
-  /** Relative path to the .gcm file from pagesDir */
+  /** Relative path to the .gcm file from pagesDir (e.g. "PageDir/content.gcm") */
   file: string;
+  /** Attachment entries synced for this page */
+  attachments?: AttachmentManifestEntry[];
 }
 
 export interface SyncManifest {
