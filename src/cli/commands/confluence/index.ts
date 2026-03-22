@@ -370,9 +370,12 @@ async function handlePull(args: ParsedArgs): Promise<void> {
     loadManifest,
     saveManifest,
     hashContent,
+    hashBinaryData,
     findEntry,
     upsertEntry,
     titleToFilename,
+    ATTACHMENTS_DIR,
+    CONTENT_FILE,
   } = await import("@/confluence/sync");
   const { multiSelect } = await import("@/utils/multi-select");
 
@@ -489,6 +492,7 @@ async function handlePull(args: ParsedArgs): Promise<void> {
   let pulled = 0;
   let skipped = 0;
   let errors = 0;
+  let totalAttachments = 0;
 
   for (const pageId of selectedIds) {
     const pageMeta = pagesToOffer.find((p) => p.id === pageId);
@@ -530,23 +534,90 @@ async function handlePull(args: ParsedArgs): Promise<void> {
         sourceUrl,
       });
 
-      // Write file
-      const filename = titleToFilename(fullPage.title) + ".gcm";
-      const filePath = join(spaceDir, filename);
-      await writeFile(filePath, gcmContent, "utf-8");
+      // Create page directory structure: <spaceDir>/<pageDir>/content.gcm + attachments/
+      const pageDirName = titleToFilename(fullPage.title);
+      const pageDir = join(spaceDir, pageDirName);
+      const attachDir = join(pageDir, ATTACHMENTS_DIR);
 
-      // Update manifest
+      if (!existsSync(pageDir)) {
+        await mkdir(pageDir, { recursive: true });
+      }
+      if (!existsSync(attachDir)) {
+        await mkdir(attachDir, { recursive: true });
+      }
+
+      // Write GCM content file
+      const contentFilePath = join(pageDir, CONTENT_FILE);
+      await writeFile(contentFilePath, gcmContent, "utf-8");
+
+      // --- Fetch and download attachments ---
+      const existingAttachments = existing?.attachments ?? [];
+      const existingAttachMap = new Map(
+        existingAttachments.map((a) => [a.filename, a]),
+      );
+
+      let pageAttachCount = 0;
+      type AttachmentManifestEntry = import("@/config/types").AttachmentManifestEntry;
+      const newAttachEntries: AttachmentManifestEntry[] = [];
+
+      try {
+        const remoteAttachments = await client.listAttachments(fullPage.id);
+
+        for (const att of remoteAttachments) {
+          const existingAtt = existingAttachMap.get(att.title);
+
+          // Skip download if attachment version unchanged and local file exists + hash matches
+          if (!forcePull && existingAtt && existingAtt.version === att.version.number) {
+            const localAttPath = join(attachDir, att.title);
+            if (existsSync(localAttPath)) {
+              newAttachEntries.push(existingAtt);
+              continue;
+            }
+          }
+
+          try {
+            const data = await client.downloadAttachment(att._links.download);
+            await Bun.write(join(attachDir, att.title), data);
+            const attHash = hashBinaryData(data);
+
+            newAttachEntries.push({
+              attachmentId: att.id,
+              filename: att.title,
+              hash: attHash,
+              version: att.version.number,
+            });
+
+            pageAttachCount++;
+          } catch (attErr) {
+            const { toMessage } = await import("@/utils/errors");
+            log.warn(`    ⚠ attachment "${att.title}": ${toMessage(attErr)}`);
+          }
+        }
+      } catch (attListErr) {
+        const { toMessage } = await import("@/utils/errors");
+        log.warn(`    ⚠ could not list attachments: ${toMessage(attListErr)}`);
+      }
+
+      totalAttachments += pageAttachCount;
+
+      // Update manifest with new directory-based path
+      const relativeFile = join(pageDirName, CONTENT_FILE);
       const hash = await hashContent(gcmContent);
-      upsertEntry(manifest, {
+      const manifestEntry: import("@/config/types").SyncManifestEntry = {
         pageId: fullPage.id,
         title: fullPage.title,
         version: fullPage.version.number,
         hash,
-        file: filename,
-      });
+        file: relativeFile,
+      };
+      if (newAttachEntries.length > 0) {
+        manifestEntry.attachments = newAttachEntries;
+      }
+      upsertEntry(manifest, manifestEntry);
 
       pulled++;
-      log.dim(`  ✓ ${fullPage.title} (v${fullPage.version.number})`);
+      const attSuffix = pageAttachCount > 0 ? `, ${pageAttachCount} attachment(s)` : "";
+      log.dim(`  ✓ ${fullPage.title} (v${fullPage.version.number}${attSuffix})`);
     } catch (err) {
       errors++;
       const { toMessage } = await import("@/utils/errors");
@@ -563,8 +634,9 @@ async function handlePull(args: ParsedArgs): Promise<void> {
   await saveManifest(spaceDir, manifest);
 
   log.plain("");
+  const attMsg = totalAttachments > 0 ? ` (${totalAttachments} attachment(s))` : "";
   log.success(
-    `Pull complete: ${pulled} updated, ${skipped} unchanged, ${errors} failed.`,
+    `Pull complete: ${pulled} updated${attMsg}, ${skipped} unchanged, ${errors} failed.`,
   );
   log.dim(`Files at: ${spaceDir}`);
 }
@@ -575,9 +647,10 @@ async function handlePull(args: ParsedArgs): Promise<void> {
  * Pushes locally modified .gcm files back to Confluence.
  * Only pushes files that have changed since last pull (hash-based).
  * Detects version conflicts.
+ * Also syncs attachments: uploads new files, updates changed ones.
  */
 async function handlePush(args: ParsedArgs): Promise<void> {
-  const { join } = await import("node:path");
+  const { join, dirname } = await import("node:path");
   const { readFile } = await import("node:fs/promises");
   const { existsSync } = await import("node:fs");
   const { createConfluenceClient } = await import("@/confluence/client");
@@ -588,6 +661,10 @@ async function handlePush(args: ParsedArgs): Promise<void> {
     saveManifest,
     hashContent,
     hasLocalChanges,
+    hashBinaryFile,
+    listLocalAttachments,
+    ATTACHMENTS_DIR,
+    CONTENT_FILE,
   } = await import("@/confluence/sync");
 
   const config = await requireSection("confluence");
@@ -618,12 +695,17 @@ async function handlePush(args: ParsedArgs): Promise<void> {
 
   const client = await createConfluenceClient();
 
-  // Find changed files
+  // Find changed files (GCM content changes)
   const toProcess: typeof manifest.pages = [];
 
   if (singleFile) {
+    // Match by full relative path (PageDir/content.gcm), page directory name,
+    // or legacy flat filename (PageDir.gcm)
     const entry = manifest.pages.find(
-      (e) => e.file === singleFile || e.file === singleFile + ".gcm",
+      (e) => e.file === singleFile
+        || e.file === singleFile + ".gcm"
+        || e.file === join(singleFile, CONTENT_FILE)
+        || e.file.startsWith(singleFile + "/"),
     );
     if (!entry) {
       log.error(`File "${singleFile}" not found in sync manifest.`);
@@ -633,9 +715,53 @@ async function handlePush(args: ParsedArgs): Promise<void> {
   } else if (forceAll) {
     toProcess.push(...manifest.pages);
   } else {
+    // Check for GCM content changes OR attachment changes
     for (const entry of manifest.pages) {
-      const changed = await hasLocalChanges(spaceDir, entry);
-      if (changed) toProcess.push(entry);
+      const gcmChanged = await hasLocalChanges(spaceDir, entry);
+      if (gcmChanged) {
+        toProcess.push(entry);
+        continue;
+      }
+
+      // Also check for attachment changes even if GCM is unchanged
+      const pageDir = dirname(join(spaceDir, entry.file));
+      const localFiles = await listLocalAttachments(pageDir);
+      const manifestAttachMap = new Map(
+        (entry.attachments ?? []).map((a) => [a.filename, a]),
+      );
+
+      // New files not in manifest?
+      const hasNewFiles = localFiles.some((f) => !manifestAttachMap.has(f));
+      if (hasNewFiles) {
+        toProcess.push(entry);
+        continue;
+      }
+
+      // Changed files (hash mismatch)?
+      let hasChangedFiles = false;
+      for (const f of localFiles) {
+        const manifestAtt = manifestAttachMap.get(f);
+        if (manifestAtt) {
+          const localHash = await hashBinaryFile(join(pageDir, ATTACHMENTS_DIR, f));
+          if (localHash !== manifestAtt.hash) {
+            hasChangedFiles = true;
+            break;
+          }
+        }
+      }
+      if (hasChangedFiles) {
+        toProcess.push(entry);
+        continue;
+      }
+
+      // Deleted local files that were in manifest?
+      const localSet = new Set(localFiles);
+      const hasDeletedFiles = (entry.attachments ?? []).some(
+        (a) => !localSet.has(a.filename),
+      );
+      if (hasDeletedFiles) {
+        toProcess.push(entry);
+      }
     }
   }
 
@@ -669,6 +795,8 @@ async function handlePush(args: ParsedArgs): Promise<void> {
   let pushed = 0;
   let conflicts = 0;
   let errors = 0;
+  let totalAttUploaded = 0;
+  let totalAttUpdated = 0;
 
   for (const entry of toProcess) {
     const filePath = join(spaceDir, entry.file);
@@ -697,22 +825,126 @@ async function handlePush(args: ParsedArgs): Promise<void> {
         continue;
       }
 
-      // Push update
-      const title = meta["title"] ?? remotePage.title;
-      await client.updatePage({
-        pageId: entry.pageId,
-        title,
-        body: html,
-        currentVersion: remotePage.version.number,
-      });
+      // Check if GCM content actually changed (it might only be attachments)
+      const gcmChanged = await hasLocalChanges(spaceDir, entry);
 
-      // Update manifest entry with new version + hash
-      const newVersion = remotePage.version.number + 1;
-      entry.version = newVersion;
-      entry.hash = await hashContent(content);
+      if (gcmChanged) {
+        // Push page body update
+        const title = meta["title"] ?? remotePage.title;
+        await client.updatePage({
+          pageId: entry.pageId,
+          title,
+          body: html,
+          currentVersion: remotePage.version.number,
+        });
 
-      pushed++;
-      log.dim(`  ✓ ${entry.title} → v${newVersion}`);
+        // Update manifest entry with new version + hash
+        const newVersion = remotePage.version.number + 1;
+        entry.version = newVersion;
+        entry.hash = await hashContent(content);
+
+        log.dim(`  ✓ ${entry.title} → v${newVersion}`);
+      }
+
+      // --- Sync attachments ---
+      const pageDir = dirname(filePath);
+      const localFiles = await listLocalAttachments(pageDir);
+      const manifestAttachMap = new Map(
+        (entry.attachments ?? []).map((a) => [a.filename, a]),
+      );
+
+      type AttachmentManifestEntry = import("@/config/types").AttachmentManifestEntry;
+      const updatedAttachEntries: AttachmentManifestEntry[] = [];
+      let pageAttUploaded = 0;
+      let pageAttUpdated = 0;
+
+      for (const filename of localFiles) {
+        const localAttPath = join(pageDir, ATTACHMENTS_DIR, filename);
+        const localHash = await hashBinaryFile(localAttPath);
+        const manifestAtt = manifestAttachMap.get(filename);
+
+        if (manifestAtt && localHash === manifestAtt.hash) {
+          // Unchanged — keep existing manifest entry
+          updatedAttachEntries.push(manifestAtt);
+          continue;
+        }
+
+        // Read the file binary
+        const data = await readFile(localAttPath);
+
+        if (manifestAtt) {
+          // Existing attachment with changed content → update
+          try {
+            const updated = await client.updateAttachmentData({
+              pageId: entry.pageId,
+              attachmentId: manifestAtt.attachmentId,
+              filename,
+              data,
+            });
+            updatedAttachEntries.push({
+              attachmentId: updated.id,
+              filename,
+              hash: localHash,
+              version: updated.version.number,
+            });
+            pageAttUpdated++;
+            log.dim(`    ↻ attachment "${filename}" updated`);
+          } catch (attErr) {
+            const { toMessage } = await import("@/utils/errors");
+            log.warn(`    ⚠ attachment "${filename}": ${toMessage(attErr)}`);
+            // Keep old manifest entry on failure
+            updatedAttachEntries.push(manifestAtt);
+          }
+        } else {
+          // New attachment → upload
+          try {
+            const uploaded = await client.uploadAttachment({
+              pageId: entry.pageId,
+              filename,
+              data,
+            });
+            updatedAttachEntries.push({
+              attachmentId: uploaded.id,
+              filename,
+              hash: localHash,
+              version: uploaded.version.number,
+            });
+            pageAttUploaded++;
+            log.dim(`    + attachment "${filename}" uploaded`);
+          } catch (attErr) {
+            const { toMessage } = await import("@/utils/errors");
+            log.warn(`    ⚠ attachment "${filename}": ${toMessage(attErr)}`);
+          }
+        }
+      }
+
+      // Check for locally deleted attachments (warn only, never delete remotely)
+      const localSet = new Set(localFiles);
+      for (const [filename, manifestAtt] of manifestAttachMap) {
+        if (!localSet.has(filename)) {
+          log.warn(
+            `    ⚠ "${filename}" exists remotely but was deleted locally — not removed from Confluence`,
+          );
+          // Keep manifest entry so we don't re-warn on next push
+          updatedAttachEntries.push(manifestAtt);
+        }
+      }
+
+      // Update entry attachments
+      if (updatedAttachEntries.length > 0) {
+        entry.attachments = updatedAttachEntries;
+      }
+
+      totalAttUploaded += pageAttUploaded;
+      totalAttUpdated += pageAttUpdated;
+
+      if (gcmChanged || pageAttUploaded > 0 || pageAttUpdated > 0) {
+        pushed++;
+      }
+
+      if (!gcmChanged && (pageAttUploaded > 0 || pageAttUpdated > 0)) {
+        log.dim(`  ✓ ${entry.title} — ${pageAttUploaded} uploaded, ${pageAttUpdated} updated attachment(s)`);
+      }
     } catch (err) {
       errors++;
       const { toMessage } = await import("@/utils/errors");
@@ -725,8 +957,12 @@ async function handlePush(args: ParsedArgs): Promise<void> {
   await saveManifest(spaceDir, manifest);
 
   log.plain("");
+  const attParts: string[] = [];
+  if (totalAttUploaded > 0) attParts.push(`${totalAttUploaded} attachment(s) uploaded`);
+  if (totalAttUpdated > 0) attParts.push(`${totalAttUpdated} attachment(s) updated`);
+  const attSuffix = attParts.length > 0 ? `, ${attParts.join(", ")}` : "";
   log.success(
-    `Push complete: ${pushed} updated, ${conflicts} conflict(s), ${errors} error(s).`,
+    `Push complete: ${pushed} updated${attSuffix}, ${conflicts} conflict(s), ${errors} error(s).`,
   );
 }
 
@@ -742,12 +978,19 @@ async function handlePush(args: ParsedArgs): Promise<void> {
  */
 async function handleRestore(args: ParsedArgs): Promise<void> {
   const { join } = await import("node:path");
-  const { writeFile } = await import("node:fs/promises");
+  const { writeFile, mkdir } = await import("node:fs/promises");
   const { existsSync } = await import("node:fs");
   const { createConfluenceClient } = await import("@/confluence/client");
   const { htmlToGcm } = await import("@/confluence/gcm/from-html");
   const { parseFrontmatter } = await import("@/confluence/gcm/spec");
-  const { loadManifest, saveManifest, upsertEntry } = await import("@/confluence/sync");
+  const {
+    loadManifest,
+    saveManifest,
+    upsertEntry,
+    titleToFilename,
+    CONTENT_FILE,
+    ATTACHMENTS_DIR,
+  } = await import("@/confluence/sync");
   const { select } = await import("@/utils/select");
 
   const config = await requireSection("confluence");
@@ -789,8 +1032,19 @@ async function handleRestore(args: ParsedArgs): Promise<void> {
       }
     } else if (fileName) {
       // Resolve the file path and read front-matter
-      if (!fileName.endsWith(".gcm")) fileName += ".gcm";
-      localFilePath = existsSync(fileName) ? fileName : join(spaceDir, fileName);
+      // Support: direct path, PageDir/content.gcm, or just the page directory name
+      if (!fileName.endsWith(".gcm")) {
+        // Could be a page directory name — try <dir>/content.gcm first
+        const dirPath = join(spaceDir, fileName, CONTENT_FILE);
+        if (existsSync(dirPath)) {
+          localFilePath = dirPath;
+        } else {
+          fileName += ".gcm";
+          localFilePath = existsSync(fileName) ? fileName : join(spaceDir, fileName);
+        }
+      } else {
+        localFilePath = existsSync(fileName) ? fileName : join(spaceDir, fileName);
+      }
       if (!existsSync(localFilePath)) {
         log.error(`File not found: ${localFilePath}`);
         process.exit(1);
@@ -929,12 +1183,15 @@ async function handleRestore(args: ParsedArgs): Promise<void> {
   // ── Write to local file ──────────────────────────────────────────────────
   // Resolve output path: use whatever we found, or synthesise one
   if (!localFilePath) {
-    const { titleToFilename } = await import("@/confluence/sync");
     const pagesDir = resolvePagesDir(args);
     const spaceDir = spaceKey ? join(pagesDir, spaceKey) : pagesDir;
-    const { mkdir } = await import("node:fs/promises");
     if (!existsSync(spaceDir)) await mkdir(spaceDir, { recursive: true });
-    localFilePath = join(spaceDir, titleToFilename(historical.title) + ".gcm");
+    const pageDirName = titleToFilename(historical.title);
+    const pageDir = join(spaceDir, pageDirName);
+    if (!existsSync(pageDir)) await mkdir(pageDir, { recursive: true });
+    const attachDir = join(pageDir, ATTACHMENTS_DIR);
+    if (!existsSync(attachDir)) await mkdir(attachDir, { recursive: true });
+    localFilePath = join(pageDir, CONTENT_FILE);
   }
 
   await writeFile(localFilePath, gcmContent, "utf-8");
@@ -948,17 +1205,24 @@ async function handleRestore(args: ParsedArgs): Promise<void> {
     const manifest = await loadManifest(spaceDir);
     if (manifest) {
       const { findEntry } = await import("@/confluence/sync");
-      const fileName = localFilePath.split("/").pop()!;
       const existing = findEntry(manifest, historical.id);
       // Keep old hash so push sees a diff; fall back to empty string for new entries
       const oldHash = existing?.hash ?? "";
-      upsertEntry(manifest, {
+      // Compute relative file path from spaceDir
+      const pageDirName = titleToFilename(historical.title);
+      const relativeFile = join(pageDirName, CONTENT_FILE);
+      const entry: import("@/config/types").SyncManifestEntry = {
         pageId:  historical.id,
         title:   historical.title,
         version: currentRemoteVersion!,
         hash:    oldHash,
-        file:    fileName,
-      });
+        file:    relativeFile,
+      };
+      // Preserve existing attachment entries
+      if (existing?.attachments) {
+        entry.attachments = existing.attachments;
+      }
+      upsertEntry(manifest, entry);
       manifest.lastSync = Date.now();
       await saveManifest(spaceDir, manifest);
     }

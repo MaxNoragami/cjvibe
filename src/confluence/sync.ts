@@ -6,7 +6,7 @@
  */
 
 import { join } from "node:path";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import type { SyncManifest, SyncManifestEntry } from "@/config/types";
 
@@ -104,4 +104,44 @@ export function titleToFilename(title: string): string {
     .replace(/\s+/g, "_")
     .replace(/_+/g, "_")
     .replace(/^_|_$/g, "");
+}
+
+// ---------------------------------------------------------------------------
+// Attachment helpers
+// ---------------------------------------------------------------------------
+
+/** The subdirectory inside each page directory where attachments live. */
+export const ATTACHMENTS_DIR = "attachments";
+
+/** The fixed name for the GCM content file inside a page directory. */
+export const CONTENT_FILE = "content.gcm";
+
+/**
+ * Compute SHA-256 hash of a binary file (for attachment change detection).
+ */
+export async function hashBinaryFile(filePath: string): Promise<string> {
+  const data = await readFile(filePath);
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(data);
+  return hasher.digest("hex");
+}
+
+/**
+ * Compute SHA-256 hash of raw binary data (ArrayBuffer / Uint8Array).
+ */
+export function hashBinaryData(data: ArrayBuffer | Uint8Array): string {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(new Uint8Array(data));
+  return hasher.digest("hex");
+}
+
+/**
+ * List all filenames inside a page's attachments/ directory.
+ * Returns an empty array if the directory doesn't exist.
+ */
+export async function listLocalAttachments(pageDir: string): Promise<string[]> {
+  const dir = join(pageDir, ATTACHMENTS_DIR);
+  if (!existsSync(dir)) return [];
+  const entries = await readdir(dir);
+  return entries.filter((e) => !e.startsWith("."));
 }
